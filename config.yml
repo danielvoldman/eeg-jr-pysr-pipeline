@@ -273,8 +273,8 @@ ukf:
     method: {value: "deterministic steady state at prior parameter means", prov: placeholder, ref: "§7.6"}
     covariance_sim_duration_s: {value: 600, prov: placeholder, ref: "§7.6", note: "per-state variance from a noise-driven simulation at literature parameters"}
     covariance_seed: {value: 42, prov: placeholder, ref: "§7.6", note: "IMP-017; the document gives no seed; g=0 two-node run, 10 s burn-in (rescaling.reference_simulation.burn_in_s) discarded"}
-    neural_variance: {value: null, prov: computed, ref: "§7.6", unit: "mV^2, mV^2/s^2, mV^2/s^4", note: "IMP-017; per-state variance of y0..y5 (ddof 1), pooled over the two nodes, shared by both nodes; written by python -m src.state_space --compute-initial-covariance"}
-    neural_variance_provenance: {value: null, prov: computed, ref: "§7.6", note: "IMP-017; seed, duration, burn-in, rate, ddof, sample counts, git hash and dirty flag, library versions"}
+    neural_variance: {value: [0.0001989829168677685, 0.06331531773015098, 1.4610859506327036, 0.9243279009140155, 490.3016124138102, 6594.547361838113], prov: computed, ref: "§7.6", unit: "mV^2, mV^2/s^2, mV^2/s^4", note: "IMP-017; per-state variance of y0..y5 (ddof 1), pooled over the two nodes, shared by both nodes; written by python -m src.state_space --compute-initial-covariance"}
+    neural_variance_provenance: {value: {"seed": 42, "kept_duration_s": 600, "burn_in_s": 10, "sim_fs_hz": 2048, "ddof": 1, "n_samples": 1228800, "nodes": "two nodes at g=0, pooled by state index", "units": "mV^2 for y0-y2, mV^2/s^2 for y3-y5 (model output units)", "git_commit": "6d138d5d271cf33ed349296cb82d0c38d46c017c", "git_dirty": false, "numpy": "2.5.3", "scipy": "1.18.1", "numba": "0.67.0"}, prov: computed, ref: "§7.6", note: "IMP-017; seed, duration, burn-in, rate, ddof, sample counts, git hash and dirty flag, library versions"}
   divergence:
     covariance_jitter: {value: 1.0e-9, prov: locked, ref: "§7.5"}
     state_sd_multiple: {value: 10, prov: locked, ref: "§7.5"}

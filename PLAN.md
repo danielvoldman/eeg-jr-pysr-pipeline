@@ -173,7 +173,7 @@ Done when:
 - The M1 variant has 17 dimensions (gains removed).
 - The §7.4 reduction order is available as config switches.
 
-Note (2026-09-29): done; src/state_space.py, tests/test_state_space.py (model.py untouched), IMP-014 to IMP-018. Layouts 19 (M2), 17 (M1), and the §7.4 switches compose through the same code path. Observation model B: y_obs = mu_ref + M (y - mu_ref) (IMP-015). m is a raw Gaussian in the state and is clipped to [0, 0.5] only inside observe() (IMP-016). The per-state initial variance is stored in config by a second commit (IMP-017). No filter, smoother, Q/R or sigma-point code.
+Note (2026-09-29): done; src/state_space.py, tests/test_state_space.py (model.py untouched), IMP-014 to IMP-018. Layouts 19 (M2), 17 (M1), and the §7.4 switches compose through the same code path. Observation model B: y_obs = mu_ref + M (y - mu_ref) (IMP-015). m is a raw Gaussian in the state and is clipped to [0, 0.5] only inside observe() (IMP-016). Code commit 6d138d5; the per-state initial variance (seed 42, 600 s, dry run and write at 6d138d5) is stored in config by the second C1 commit (IMP-017). No filter, smoother, Q/R or sigma-point code.
 Note for Stage E (E2): the G0 generator must mix the deviations from mu_ref with M(m) and then rescale, to match the fitted observation model (IMP-015).
 Note for C3: clipping of the REPORTED recording-level m to [0, 0.5] is decided in C3 (IMP-016).
 
