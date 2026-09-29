@@ -33,7 +33,7 @@ Done when:
 
 Note (2026-09-28): done; main.py, src/config.py, tests/ (32 pass). Runners are stubs that exit 1 and never write a flag. IMP-001 and IMP-002 logged.
 
-### [ ] A2. Jansen–Rit simulator (model.py)
+### [x] A2. Jansen–Rit simulator (model.py)
 Read: §7.1, §7.3 (including the sigmoid), §7.2, §7.5 (delay), §7.6 (integrator), §8.1, §9.1 (generation rate).
 Files: `src/model.py`.
 Done when tests show:
@@ -45,6 +45,8 @@ Done when tests show:
 - The same seed gives bit-identical output, and different seeds give different output.
 - A 600-s run produces no NaN or Inf.
 - Sanity report (not a pass rule): the spectral peak of the noise-driven output at p = 220. Classic Jansen–Rit gives alpha around 10 Hz. If it doesn't, stop and tell me.
+
+Note (2026-09-28): done; src/model.py (Heun, numba kernel + py_func fallback), tests/test_model.py. Sanity report: single-node p=220 y1-y2 Welch peak 10.75 Hz. IMP-003 logged; numba and scipy installed (approved). The 600-s duration vs 10-s burn-in question is left to A4.
 
 ### [ ] A3. Filtering and downsampling functions (preprocess.py)
 Read: §5.1 (band-pass step and downsample step), §10.1.

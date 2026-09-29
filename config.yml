@@ -112,11 +112,11 @@ rescaling:
     duration_s: {value: 600, prov: locked, ref: "§5.1"}
     sim_fs_hz: {value: 2048, prov: locked, ref: "§5.1"}
     parameters: {value: "standard §7.3 parameters", prov: locked, ref: "§5.1"}
-    seed: {value: null, prov: unset, ref: "§5.1", note: "doc gives no seed"}
-    burn_in_s: {value: null, prov: unset, ref: "§5.1", note: "doc gives no burn-in for this simulation"}
-    node_structure: {value: null, prov: unset, ref: "§5.1", note: "single node, or two-node at g=0? doc does not say"}
-    integrator: {value: null, prov: unset, ref: "§5.1, §7.6, §9.1", note: "§7.6 says Heun, §9.1 says Euler-Maruyama or stochastic Heun"}
-    noise_redraw_interval: {value: null, prov: unset, ref: "§5.1", note: "per integration step, or held longer? doc does not say"}
+    seed: {value: 42, prov: placeholder, ref: "§5.1", note: "IMP-003; the document gives no seed"}
+    burn_in_s: {value: 10, prov: placeholder, ref: "§5.1", note: "IMP-003; whether duration_s includes it is deferred to A4"}
+    node_structure: {value: "single node", prov: placeholder, ref: "§5.1", note: "IMP-003; standard §7.3 parameters, no mixing, no coupling"}
+    integrator: {value: "heun", prov: placeholder, ref: "§5.1, §7.6, §9.1", note: "IMP-003; second order, input drawn once per step and held constant within the step"}
+    noise_redraw_interval: {value: "every step", prov: placeholder, ref: "§5.1", note: "IMP-003; fresh uniform draw at every 2048-Hz integration step"}
 
 # ---------------------------------------------------------------- Jansen-Rit constants (§7.3)
 jansen_rit:
@@ -137,10 +137,17 @@ jansen_rit:
   observation_output: {value: "y1 - y2", prov: locked, ref: "§7.1"}
   observation_gain: {value: 1.0, prov: locked, ref: "§7.2, §7.4", note: "fixed, not estimated"}
 
+# ---------------------------------------------------------------- simulator numerics (IMP-003)
+simulator:
+  steady_state_scan_points: {value: 2001, prov: placeholder, ref: "IMP-003", note: "grid over y0 in (0, 2*e0*A/a) scanned for sign changes of the fixed-point residual"}
+  steady_state_bisection_iterations: {value: 100, prov: placeholder, ref: "IMP-003"}
+  sanity_welch_segment_s: {value: 8, prov: placeholder, ref: "IMP-003", note: "Welch segment length for the A2 sanity report (test only)"}
+
 # ---------------------------------------------------------------- coupling and delay (§7.3, §8.1)
 coupling:
   delay_ms_nominal: {value: 10.0, prov: placeholder, ref: "§7.3", note: "inter-node delay, both directions, fixed"}
   delay_substeps: {value: 10, prov: placeholder, ref: "§7.5, §7.6", note: "at 1024 Hz effective step this is about 9.77 ms"}
+  sim_delay_steps: {value: 20, prov: placeholder, ref: "§7.5, §9.1", note: "IMP-003; simulator delay in 2048-Hz steps = 9.765625 ms, equal to the UKF's 10 sub-steps at 1024 Hz"}
   gain_prior_mean: {value: 0.0, prov: placeholder, ref: "§7.3, §7.6", unit: "1/s"}
   gain_prior_sd_factor_of_C2: {value: 0.1, prov: placeholder, ref: "§7.3, §7.6", note: "SD = 0.1*C2 = 10.8 1/s"}
   common_input_term_in_fitted_model: {value: false, prov: locked, ref: "§7.2"}
