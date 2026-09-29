@@ -76,7 +76,14 @@ preprocessing:
     highpass_hz: {value: 0.5, prov: placeholder, ref: "§5.1"}
     lowpass_hz: {value: 45, prov: locked, ref: "§5.1", note: "no separate tag in the doc; treated as locked"}
     zero_phase: {value: true, prov: locked, ref: "§5.1", note: "no causal IIR filters"}
-    filter_family: {value: null, prov: unset, ref: "§5.1", note: "doc allows forward-backward or linear-phase FIR; pick one and log it"}
+    filter_family: {value: "butterworth", prov: placeholder, ref: "§5.1", note: "IMP-004; SOS form, applied forward and backward with sosfiltfilt; nominal cutoffs are the -6 dB points of the combined filter"}
+    filter_order: {value: 4, prov: placeholder, ref: "§5.1", note: "IMP-004; per pass, separately for the high-pass and the low-pass"}
+    edge_pad_s: {value: 10, prov: placeholder, ref: "§5.1", note: "IMP-004; sosfiltfilt padlen = round(edge_pad_s * fs)"}
+    edge_padtype: {value: "odd", prov: placeholder, ref: "§5.1", note: "IMP-004; sosfiltfilt padtype"}
+    impulse_response_duration_s: {value: 120, prov: placeholder, ref: "§5.1", note: "IMP-004; length of the array returned by bandpass_impulse_response"}
+  resample:
+    pad_s: {value: 2, prov: placeholder, ref: "§5.1, §10.1", note: "IMP-004; reflect-pad before the FFT resample, rounded up to a multiple of the ratio"}
+    reflect_type: {value: "odd", prov: placeholder, ref: "§5.1, §10.1", note: "IMP-004; numpy reflect_type for the resample pad"}
   ocular:
     method: {value: "wavelet", prov: placeholder, ref: "§5.1", note: "pilot may compare EMD"}
     detect_band_hz: {value: [0.5, 5.0], prov: placeholder, ref: "§5.1"}
@@ -394,7 +401,7 @@ open_questions_for_implementation:
   - "rescaling.reference_simulation: seed, burn-in, single node vs two-node at g=0, integrator, noise redraw interval (PLAN.md A4)"
   - "split.extra_seeds: the 4 additional split seeds (PLAN.md B2)"
   - "preprocessing.bad_channel: flat-line and saturation thresholds"
-  - "preprocessing.line_noise.notch_width and preprocessing.bandpass.filter_family"
+  - "preprocessing.line_noise.notch_width (filter_family was settled in IMP-004)"
   - "residual.tv_weight_grid: the 5 values"
   - "pysr.subsample.seed, g0.seeds, aaft.seed: seed values"
   - "pysr.version: exact version to pin at setup"

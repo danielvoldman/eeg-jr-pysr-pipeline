@@ -48,7 +48,7 @@ Done when tests show:
 
 Note (2026-09-28): done; src/model.py (Heun, numba kernel + py_func fallback), tests/test_model.py. Sanity report: single-node p=220 y1-y2 Welch peak 10.75 Hz. IMP-003 logged; numba and scipy installed (approved). The 600-s duration vs 10-s burn-in question is left to A4.
 
-### [ ] A3. Filtering and downsampling functions (preprocess.py)
+### [x] A3. Filtering and downsampling functions (preprocess.py)
 Read: §5.1 (band-pass step and downsample step), §10.1.
 Files: `src/preprocess.py` (filter and resample functions only).
 Done when tests show:
@@ -56,6 +56,8 @@ Done when tests show:
 - Passband gain is about 1 at 10 Hz, and there is clear attenuation at 0.1 Hz and 60 Hz.
 - The anti-alias and downsample path works from both 1,024 Hz and 2,048 Hz to 256 Hz.
 - The impulse response is saved and documented (the §5.1 disclosure).
+
+Note (2026-09-28): done; src/preprocess.py (bandpass, bandpass_sos, bandpass_impulse_response, downsample), tests/test_preprocess.py. Butterworth SOS via sosfiltfilt, order 4 per pass, so the nominal 0.5 and 45 Hz cutoffs are the -6 dB points; FFT downsampling with a 2 s odd reflect-pad (IMP-004). bandpass() is for whole continuous recordings before segmentation, never for short segments; inputs of padlen samples or fewer raise by design. Trimming or masking the filtered edges is decided in B4 using the printed edge-transient numbers; nothing is trimmed in A3. The impulse response is returned by a function only; saving it is deferred to phase 1 (see the B4 bullet).
 
 ### [ ] A4. Reference constants μ_ref and σ_ref
 Read: §5.1 (rescaling paragraph), §7.3, §7.6 ("Rescaling constants" row).
@@ -113,6 +115,7 @@ Done when:
 - The zero-phase band-pass from A3 is applied.
 - The bipolar pairs P3–PO3 and P4–PO4 are formed.
 - Variant flags for §5.2 exist: 0.1 Hz high-pass, and strict rejection.
+- Phase 1 saves the band-pass impulse response for both high-pass variants (0.5 and 0.1 Hz) under outputs/ (§5.1 disclosure).
 
 ### [ ] B5. Channel pipeline, part 2
 Read: §5.1 steps 7–10, §10.2.
