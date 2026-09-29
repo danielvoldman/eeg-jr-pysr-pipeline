@@ -509,3 +509,64 @@ def test_stored_neural_variance_matches_code():
     assert prov["seed"] == 42 and prov["kept_duration_s"] == 600 and prov["burn_in_s"] == 10
     assert prov["ddof"] == 1 and prov["sim_fs_hz"] == 2048
     assert re.fullmatch(r"[0-9a-f]{40}", prov["git_commit"])
+
+
+# ---- C2b: guard, per-point parameters, buffer after replace_latest ----------------------------------------
+
+def test_delay_guard_needs_delay_at_least_substeps(cfg):
+    n_sub = cfg["ukf"]["substeps_per_observation"]
+    ok = copy.deepcopy(cfg)
+    ok["coupling"]["delay_substeps"] = n_sub                       # equal is allowed
+    ss.make_layout(ok)
+    ss.make_buffer(ok)
+    bad = copy.deepcopy(cfg)
+    bad["coupling"]["delay_substeps"] = n_sub - 1
+    with pytest.raises(ss.StateSpaceError, match="delay_substeps"):
+        ss.make_layout(bad)
+    with pytest.raises(ss.StateSpaceError, match="delay_substeps"):
+        ss.make_buffer(bad)
+    bad2 = copy.deepcopy(cfg)
+    bad2["ukf"]["substeps_per_observation"] = cfg["coupling"]["delay_substeps"] + 1
+    with pytest.raises(ss.StateSpaceError):
+        ss.make_layout(bad2)
+
+
+def test_drift_uses_each_sigma_points_own_parameters(cfg):
+    layout = ss.make_layout(cfg)
+    rng = np.random.default_rng(8)
+    n_pts = 7
+    X = np.tile(ss.prior_mean(layout, cfg), (n_pts, 1))
+    X[:, :12] += rng.normal(size=(n_pts, 12)) * np.array([0.01, 0.2, 1.0, 1.0, 20.0, 60.0] * 2)
+    X[:, ss.P1] = rng.uniform(150, 300, n_pts)
+    X[:, ss.P2] = rng.uniform(150, 300, n_pts)
+    X[:, ss.LOG_RHO1] = rng.normal(math.log(3.25 / 22), 0.2, n_pts)
+    X[:, ss.LOG_RHO2] = rng.normal(math.log(3.25 / 22), 0.2, n_pts)
+    X[:, ss.G12] = rng.normal(0, 10, n_pts)
+    X[:, ss.G21] = rng.normal(0, 10, n_pts)
+    s = rng.uniform(0.5, 4.0, size=(n_pts, 2))                     # a different delayed S per point too
+    batched = ss.drift(X, s, layout, cfg)
+    ab = cfg["priors"]["AB_product"]
+    for i in range(n_pts):
+        np.testing.assert_allclose(batched[i], ss.drift(X[i], s[i], layout, cfg), rtol=1e-13, atol=1e-13)
+        expected = np.zeros(19)
+        for j, (p, lr, g_in, s_src) in enumerate(((X[i, ss.P1], X[i, ss.LOG_RHO1], X[i, ss.G21], s[i, 1]),
+                                                  (X[i, ss.P2], X[i, ss.LOG_RHO2], X[i, ss.G12], s[i, 0]))):
+            rho = math.exp(lr)
+            expected[6 * j:6 * j + 6] = rhs_node(X[i, 6 * j:6 * j + 6], p, g_in * s_src,
+                                                 math.sqrt(ab * rho), math.sqrt(ab / rho))
+        np.testing.assert_allclose(batched[i], expected, rtol=1e-10, atol=1e-9)
+    # the rows really differ from each other (a "row 0 for all points" bug would be visible)
+    assert np.abs(batched[1:, :12] - batched[0, :12]).max() > 1.0
+
+
+def test_replace_latest_touches_only_the_newest_entry():
+    buf = ss.DelayBuffer(10, 2)
+    buf.reset([1.0, 1.0])
+    for n in range(1, 5):                                          # four sub-steps of one observation step
+        buf.write([n, -n])
+    before = [buf.read(lag).copy() for lag in range(11)]
+    buf.replace_latest([99.0, -99.0])
+    for lag in range(1, 11):
+        assert np.array_equal(buf.read(lag), before[lag]), lag
+    assert np.array_equal(buf.read(0), [99.0, -99.0]) and not np.array_equal(before[0], buf.read(0))
+    assert [buf.read(l)[0] for l in (1, 2, 3, 4)] == [3, 2, 1, 1.0]   # predicted entries 3, 2, 1, then the fill

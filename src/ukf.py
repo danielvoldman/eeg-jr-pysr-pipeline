@@ -40,10 +40,22 @@ def sigma_weights(n, alpha, beta, kappa):
     return lam, Wm, Wc
 
 
-def sigma_points(x, P, lam):
-    """[x, x + U_k, x - U_k], U = upper-triangular cholesky((n + lambda) P), k = rows of U."""
+def sigma_points(x, P, lam, jitter=0.0, jitter_used=None):
+    """[x, x + U_k, x - U_k], U = upper-triangular cholesky((n + lambda) P), k = rows of U.
+
+    jitter (IMP-024): only if the plain Cholesky fails, retry once with P + jitter * I (§7.5:
+    P + 1e-9 I must be positive definite); a success then appends to `jitter_used`, and a
+    second failure raises LinAlgError. Whenever the plain factorization works the result is
+    bit-identical to filterpy's."""
     n = x.shape[0]
-    U = cholesky((lam + n) * P)
+    try:
+        U = cholesky((lam + n) * P)
+    except np.linalg.LinAlgError:
+        if jitter <= 0.0:
+            raise
+        U = cholesky((lam + n) * (P + jitter * np.eye(n)))
+        if jitter_used is not None:
+            jitter_used.append(1)
     sig = np.empty((2 * n + 1, n), dtype=np.float64)
     sig[0] = x
     sig[1:n + 1] = x + U
@@ -67,8 +79,10 @@ class UnscentedFilter:
     observe(sigmas_f) -> sigmas_h, both batched over the rows.
     """
 
-    def __init__(self, n, weights, Q, R, propagate, observe):
+    def __init__(self, n, weights, Q, R, propagate, observe, jitter=0.0):
         self.n = n
+        self.jitter = jitter
+        self._jitter_used = []
         self.lam, self.Wm, self.Wc = weights
         self.Q, self.R = Q, R
         self.propagate, self.observe = propagate, observe
@@ -77,9 +91,14 @@ class UnscentedFilter:
         self.sigmas_f = None
 
     def predict(self):
-        sigmas = sigma_points(self.x, self.P, self.lam)
+        sigmas = sigma_points(self.x, self.P, self.lam, self.jitter, self._jitter_used)
         self.sigmas_f = np.asarray(self.propagate(sigmas, self.Wm), dtype=np.float64)
         self.x, self.P = unscented_transform(self.sigmas_f, self.Wm, self.Wc, self.Q)
+
+    @property
+    def n_jitter(self):
+        """Number of sigma-point draws that needed the jitter fallback."""
+        return len(self._jitter_used)
 
     def update(self, z):
         sigmas_h = np.atleast_2d(self.observe(self.sigmas_f))
@@ -95,7 +114,7 @@ class UnscentedFilter:
         self.P = self.P - np.dot(self.K, np.dot(self.S, self.K.T))
 
 
-def rts_smooth(xs, Ps, weights, Q, propagate_k):
+def rts_smooth(xs, Ps, weights, Q, propagate_k, jitter=0.0, jitter_used=None):
     """Unscented RTS smoother, filterpy's rts_smoother recursion (Freestone et al. 2011 style).
 
     xs, Ps are the filtered means and covariances. propagate_k(k, sigmas, Wm) maps sigma
@@ -106,7 +125,7 @@ def rts_smooth(xs, Ps, weights, Q, propagate_k):
     n_steps, n = xs.shape
     xsm, Psm = xs.copy(), Ps.copy()
     for k in reversed(range(n_steps - 1)):
-        sigmas = sigma_points(xs[k], Ps[k], lam)
+        sigmas = sigma_points(xs[k], Ps[k], lam, jitter, jitter_used)
         sigmas_f = np.asarray(propagate_k(k, sigmas, Wm), dtype=np.float64)
         xb, Pb = unscented_transform(sigmas_f, Wm, Wc, Q)
         Pxb = 0
@@ -212,7 +231,8 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
     filt = UnscentedFilter(
         n, weights_for(n, cfg), process_noise(layout, cfg, q), obs_noise(cfg),
         propagate=lambda s, wm: ss.predict(s, wm, buf, layout, cfg),
-        observe=lambda s: ss.observe(s, layout, cfg))
+        observe=lambda s: ss.observe(s, layout, cfg),
+        jitter=cfg["ukf"]["divergence"]["covariance_jitter"])
     filt.x, filt.P = x0.copy(), P0.copy()
 
     res = FilterResult(
@@ -226,13 +246,14 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
         try:
             filt.predict()
             filt.update(z[t])
-        except (np.linalg.LinAlgError, ValueError) as exc:
+        except np.linalg.LinAlgError as exc:      # IMP-025: nothing else is a divergence
             res.diverged, res.divergence_step = True, t
             res.divergence_reason = f"linalg_error: {exc}"
             break
         sym = 0.5 * (filt.P + filt.P.T)
         finite = bool(np.all(np.isfinite(filt.P)))
         min_eig = float(np.linalg.eigvalsh(sym)[0]) if finite else float("nan")
+        res.min_eig[t] = min_eig          # stored before the check: the offending step counts (IMP-025)
         reason = _first_divergence(filt.x, filt.P, cfg, center, sd, min_eig)
         if reason is not None:
             res.diverged, res.divergence_step, res.divergence_reason = True, t, reason
@@ -241,14 +262,14 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
         res.x[t], res.z_pred[t], res.S[t] = filt.x, filt.zp, filt.S
         res.innovation[t] = filt.y
         res.nis[t] = float(filt.y @ filt.SI @ filt.y)
-        res.min_eig[t] = min_eig
         if keep_cov:
             res.P[t] = filt.P
         res.n_done = t + 1
-    done = res.min_eig[:res.n_done]
+    seen = res.min_eig[np.isfinite(res.min_eig)]      # completed steps plus the diverged one, if computed
     res.monitor = {
-        "min_eig_overall": float(done.min()) if done.size else float("nan"),
-        "n_negative_eig_steps": int(np.count_nonzero(done < 0.0)),
+        "min_eig_overall": float(seen.min()) if seen.size else float("nan"),
+        "n_negative_eig_steps": int(np.count_nonzero(seen < 0.0)),
+        "n_jitter_fallbacks": filt.n_jitter,
         "nan_inf_seen": bool(res.divergence_reason == "nan_inf"),
         "diverged": res.diverged, "divergence_step": res.divergence_step,
         "divergence_reason": res.divergence_reason, "n_done": res.n_done,
@@ -273,5 +294,9 @@ def run_smoother(result, cfg):
         buf = buffer_from_snapshot(result.snapshots[k + 1])
         return ss.predict(sigmas, wm, buf, layout, cfg)
 
-    return rts_smooth(xs, Ps, weights_for(layout.n, cfg), process_noise(layout, cfg, result.q),
-                      propagate_k)
+    used = []
+    out = rts_smooth(xs, Ps, weights_for(layout.n, cfg), process_noise(layout, cfg, result.q),
+                     propagate_k, cfg["ukf"]["divergence"]["covariance_jitter"], used)
+    if used:
+        log.warning("smoother needed the covariance jitter fallback at %d steps", len(used))
+    return out

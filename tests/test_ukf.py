@@ -23,15 +23,25 @@ SP = CFG["ukf"]["sigma_points"]
 MU_REF = CFG["rescaling"]["mu_ref"]
 SIGMA_REF = CFG["rescaling"]["sigma_ref"]
 Q_TEST = 1.0e-2          # fixed a priori: inside the 1e-4 .. 1e-1 grid of §7.6; never tuned to a result
+JITTER = CFG["ukf"]["divergence"]["covariance_jitter"]
+SEEDS = (7, 21, 22, 23)  # the four seeds measured in the C2 review
+Y1_SMOOTHER_TOL = 0.15   # C2b: smoother may be worse than the filter on y1 by at most 0.15 SD (review: +0.125)
+GAIN_MEAN_BOUND = 3.0    # C2b: |mean filtered/smoothed gain| for zero coupling (review: max 1.83)
+G12_TRUE = 12.0          # C2b coupled test, fixed before the first run: g12 = 12, g21 = 0
+COUPLED_BAND = (0.5, 1.5)   # mean of the filtered (and smoothed) g12 over the last half must lie in 0.5..1.5 x truth
+COUPLED_G21_BOUND = 3.0
+COUPLED_P = (220.0, 235.0)  # asymmetric nodes. First tried (220, 260): with g12 = 12 the true node-2 mean y1 is then
+                            # 10.5 SD from the prior steady state and the §7.5 divergence rule stops the run (step 104);
+                            # (220, 235) gives 7.1 SD. The band and g12 were not changed (IMP-026, PLAN.md C2b).
 
 
 # ---- helpers: simulated data with known truth ---------------------------------------------
 
-def simulate_data(seconds, seed, g12=0.0, g21=0.0, m=0.2):
+def simulate_data(seconds, seed, g12=0.0, g21=0.0, m=0.2, p=None):
     """Two-node A2 run at 2048 Hz, sampled every 8th step (256 Hz), mixed on the deviations
     from mu_ref (IMP-015), observation noise with the filter's R. Returns (truth states, z)."""
     n = int(seconds * 2048)
-    res = model.simulate(CFG, n, seed=seed, n_nodes=2, g12=g12, g21=g21)
+    res = model.simulate(CFG, n, seed=seed, n_nodes=2, g12=g12, g21=g21, p=p)
     states = res.states[8::8]                                  # (T, 2, 6) at the observation times
     y = states[:, :, 1] - states[:, :, 2]
     M = np.array([[1.0, m], [m, 1.0]])
@@ -50,13 +60,22 @@ def layout():
     return ss.make_layout(CFG)
 
 
-@pytest.fixture(scope="module")
-def run(layout):
-    """One 12 s coupling-free series, q = Q_TEST, forward filter with covariances and smoother."""
-    truth, z = simulate_data(12, seed=7)
-    res = ukf.run_filter(z, CFG, layout, Q_TEST, keep_cov=True)
+def filter_and_smooth(layout, truth_z, q=Q_TEST):
+    truth, z = truth_z
+    res = ukf.run_filter(z, CFG, layout, q, keep_cov=True)
     xs, Ps = ukf.run_smoother(res, CFG)
     return {"truth": truth, "z": z, "res": res, "xs": xs, "Ps": Ps}
+
+
+@pytest.fixture(scope="module")
+def runs(layout):
+    """Four 12 s coupling-free series (C2 review seeds), q = Q_TEST, filter with covariances and smoother."""
+    return {seed: filter_and_smooth(layout, simulate_data(12, seed=seed)) for seed in SEEDS}
+
+
+@pytest.fixture(scope="module")
+def run(runs):
+    return runs[7]
 
 
 BURN = 512               # 2 s at 256 Hz, discarded before every score
@@ -301,22 +320,30 @@ def normalized_rmse(est, truth):
     return np.sqrt(((est[BURN:, :12] - truth[BURN:len(est)]) ** 2).mean(axis=0)) / sd
 
 
-def test_filter_beats_prior_and_smoother_beats_filter(run):
-    res, truth = run["res"], run["truth"]
-    assert res.n_done == len(truth) and not res.diverged
-    prior = np.tile(ss.initial_neural_state(CFG), (len(truth), 1))
-    rf = normalized_rmse(res.x, truth)
-    rs = normalized_rmse(run["xs"], truth)
-    rp = normalized_rmse(prior, truth)
-    print("\nnormalized RMSE per neural state (burn-in 2 s discarded)"
-          f"\n  prior    {np.round(rp, 3)}\n  filter   {np.round(rf, 3)}\n  smoother {np.round(rs, 3)}")
-    assert (rf < rp).all()
-    assert rs.mean() < rf.mean()
-    # per state, except y1 of each node: y1 is seen only through y1 - y2, is barely better than the
-    # prior (0.9 of the prior error), and the smoother can be slightly worse there (measured on
-    # seeds 7, 21, 22, 23: one y1 state in each, by 0.002 to 0.12; see IMP-023)
+def test_filter_beats_prior_and_smoother_beats_filter(runs):
+    """C2b: mean over four seeds. Per seed: smoother better on average, and per state except y1 of each
+    node; y1 (seen only through y1 - y2, SD 0.25 mV against an observation noise SD of 0.57 mV, so
+    essentially unobservable) may be worse after smoothing by at most Y1_SMOOTHER_TOL SD."""
+    rp_all, rf_all = [], []
+    y1 = [1, 7]
     not_y1 = [i for i in range(12) if i % 6 != 1]
-    assert (rs[not_y1] <= rf[not_y1]).all()
+    for seed, r in runs.items():
+        res, truth = r["res"], r["truth"]
+        assert res.n_done == len(truth) and not res.diverged
+        prior = np.tile(ss.initial_neural_state(CFG), (len(truth), 1))
+        rf, rs, rp = (normalized_rmse(r["res"].x, truth), normalized_rmse(r["xs"], truth),
+                      normalized_rmse(prior, truth))
+        rf_all.append(rf)
+        rp_all.append(rp)
+        print(f"\nseed {seed}: normalized RMSE (burn-in 2 s discarded)"
+              f"\n  prior    {np.round(rp, 3)}\n  filter   {np.round(rf, 3)}\n  smoother {np.round(rs, 3)}"
+              f"\n  smoother - filter on y1: {np.round(rs[y1] - rf[y1], 3)}")
+        assert rs.mean() < rf.mean()
+        assert (rs[not_y1] <= rf[not_y1]).all()
+        assert (rs[y1] - rf[y1] <= Y1_SMOOTHER_TOL).all()
+    mf, mp = np.mean(rf_all, axis=0), np.mean(rp_all, axis=0)
+    print(f"\nmean over seeds: prior {np.round(mp, 3)}\n                 filter {np.round(mf, 3)}")
+    assert (mf < mp).all()
 
 
 def test_nis_mean_in_fixed_band(run):
@@ -326,24 +353,24 @@ def test_nis_mean_in_fixed_band(run):
     assert 1.0 <= mean <= 4.0
 
 
-def test_zero_coupling_gains_stay_near_zero(run, layout):
-    sd_g = CFG["coupling"]["gain_prior_sd_factor_of_C2"] * model.constants(CFG)["C2"]
-    x = run["res"].x[BURN:]
-    for name in ("g12", "g21"):
-        mean_g = float(x[:, layout.idx[name]].mean())
-        print(f"\n{name}: mean filtered estimate {mean_g:.3f} (truth 0, prior SD {sd_g:.2f})")
-        assert abs(mean_g) < sd_g
-    # smoothed trajectory too
-    assert abs(float(run["xs"][BURN:, layout.idx["g12"]].mean())) < sd_g
+def test_zero_coupling_gains_stay_near_zero(runs, layout):
+    """C2b: fixed bound GAIN_MEAN_BOUND (the prior SD is 10.8; the review measured |mean| <= 1.83)."""
+    for seed, r in runs.items():
+        for name in ("g12", "g21"):
+            k = layout.idx[name]
+            mf, ms = float(r["res"].x[BURN:, k].mean()), float(r["xs"][BURN:, k].mean())
+            print(f"\nseed {seed} {name}: filtered mean {mf:.3f}, smoothed mean {ms:.3f} (truth 0)")
+            assert abs(mf) < GAIN_MEAN_BOUND and abs(ms) < GAIN_MEAN_BOUND
 
 
 def test_monitor_reported_and_healthy(run):
     mon = run["res"].monitor
     assert set(mon) >= {"min_eig_overall", "n_negative_eig_steps", "nan_inf_seen", "diverged",
-                        "divergence_step", "divergence_reason", "n_done"}
+                        "divergence_step", "divergence_reason", "n_done", "n_jitter_fallbacks"}
     print(f"\nmin covariance eigenvalue over the run: {mon['min_eig_overall']:.3e}")
     assert mon["min_eig_overall"] > 0 and mon["n_negative_eig_steps"] == 0
     assert mon["nan_inf_seen"] is False and mon["diverged"] is False
+    assert mon["n_jitter_fallbacks"] == 0
     assert np.isfinite(run["res"].min_eig[:run["res"].n_done]).all()
 
 
@@ -408,6 +435,226 @@ def test_noise_matrices(layout):
     np.testing.assert_allclose(np.diag(Q)[12:], 1.0e-3 * prior[12:] * dt, rtol=1e-14)
     assert np.array_equal(Q, np.diag(np.diag(Q)))
     np.testing.assert_allclose(ukf.obs_noise(CFG), 0.25 * SIGMA_REF ** 2 * np.eye(2), rtol=1e-14)
+
+
+# ---- C2b: exceptions, monitor, jitter --------------------------------------------------------------------
+
+def test_config_error_propagates_instead_of_divergence(layout):
+    cfg = copy.deepcopy(CFG)
+    cfg["rescaling"]["mu_ref"] = None
+    _, z = simulate_data(1, seed=3)
+    with pytest.raises(ss.StateSpaceError):
+        ukf.run_filter(z[:5], cfg, layout, Q_TEST)
+
+
+def test_other_value_errors_propagate(layout, monkeypatch):
+    _, z = simulate_data(1, seed=3)
+
+    def boom(*args, **kwargs):
+        raise ValueError("a bug, not a divergence")
+    monkeypatch.setattr(ss, "predict", boom)
+    with pytest.raises(ValueError, match="a bug"):
+        ukf.run_filter(z[:5], CFG, layout, Q_TEST)
+
+
+def test_linalg_error_is_recorded_as_divergence(layout, monkeypatch):
+    _, z = simulate_data(1, seed=3)
+
+    def boom(*args, **kwargs):
+        raise np.linalg.LinAlgError("singular")
+    monkeypatch.setattr(ss, "predict", boom)
+    res = ukf.run_filter(z[:5], CFG, layout, Q_TEST)
+    assert res.diverged and res.divergence_step == 0 and res.n_done == 0
+    assert res.divergence_reason.startswith("linalg_error")
+    assert res.monitor["diverged"] is True
+
+
+def test_monitor_includes_the_offending_step_on_not_pd(layout):
+    """q = 1e15 makes the covariance indefinite at step 1 (IMP-021); the negative eigenvalue of that
+    step must be in the monitor even though the step is not counted as done."""
+    _, z = simulate_data(1, seed=5)
+    res = ukf.run_filter(z, CFG, layout, 1.0e15)
+    assert res.divergence_reason == "covariance_not_pd"
+    mon = res.monitor
+    assert mon["n_negative_eig_steps"] >= 1 and mon["min_eig_overall"] <= 0.0
+    assert res.min_eig[res.divergence_step] == mon["min_eig_overall"] < 0.0
+    assert res.n_done == res.divergence_step and np.isnan(res.x[res.divergence_step]).all()
+
+
+def test_sigma_points_jitter_only_when_plain_cholesky_fails():
+    x = np.zeros(3)
+    P = np.diag([1.0, 2.0, 3.0])
+    used = []
+    assert np.array_equal(ukf.sigma_points(x, P, 0.0), ukf.sigma_points(x, P, 0.0, JITTER, used))
+    assert used == []                                     # PD: bit-identical to the plain factorization
+    P_lo = np.diag([1.0, 2.0, -0.5 * JITTER])             # P + jitter I is PD, P is not
+    with pytest.raises(np.linalg.LinAlgError):
+        ukf.sigma_points(x, P_lo, 0.0)
+    pts = ukf.sigma_points(x, P_lo, 0.0, JITTER, used)
+    assert used == [1] and np.isfinite(pts).all()
+    assert np.array_equal(pts, ukf.sigma_points(x, P_lo + JITTER * np.eye(3), 0.0))
+    with pytest.raises(np.linalg.LinAlgError):            # P + jitter I is still indefinite
+        ukf.sigma_points(x, np.diag([1.0, 2.0, -2.0 * JITTER]), 0.0, JITTER, used)
+
+
+def test_filter_predict_uses_jitter_fallback_and_counts_it():
+    w = ukf.sigma_weights(2, SP["alpha"], SP["beta"], SP["kappa"])
+    P0 = np.diag([1.0, -0.5 * JITTER])
+    f = ukf.UnscentedFilter(2, w, np.zeros((2, 2)), np.eye(1), lambda s, wm: s, lambda s: s[:, :1], jitter=JITTER)
+    f.x, f.P = np.zeros(2), P0.copy()
+    f.predict()
+    assert f.n_jitter == 1
+    g = ukf.UnscentedFilter(2, w, np.zeros((2, 2)), np.eye(1), lambda s, wm: s, lambda s: s[:, :1])
+    g.x, g.P = np.zeros(2), P0.copy()
+    with pytest.raises(np.linalg.LinAlgError):
+        g.predict()
+
+
+# ---- C2b: coupled data, asymmetric nodes -----------------------------------------------------------------
+
+def test_coupled_filter_moves_g12_toward_truth_and_keeps_g21_near_zero(layout):
+    """g12 = G12_TRUE (node 1 -> node 2), g21 = 0, p = COUPLED_P. Band fixed before the first run:
+    mean of the filtered and of the smoothed g12 over the last half in COUPLED_BAND x truth,
+    |mean g21| < COUPLED_G21_BOUND."""
+    truth, z = simulate_data(12, seed=31, g12=G12_TRUE, g21=0.0, p=np.array(COUPLED_P))
+    r = filter_and_smooth(layout, (truth, z))
+    assert r["res"].n_done == len(z) and not r["res"].diverged
+    half = len(z) // 2
+    g12, g21 = layout.idx["g12"], layout.idx["g21"]
+    f12, f21 = (float(r["res"].x[half:, k].mean()) for k in (g12, g21))
+    s12, s21 = (float(r["xs"][half:, k].mean()) for k in (g12, g21))
+    p1, p2 = (float(r["res"].x[half:, layout.idx[n]].mean()) for n in ("p1", "p2"))
+    print(f"\ncoupled (truth g12 = {G12_TRUE}, g21 = 0, p = {COUPLED_P}), last half:"
+          f"\n  filtered g12 {f12:.2f}, g21 {f21:.2f}; smoothed g12 {s12:.2f}, g21 {s21:.2f}; "
+          f"filtered p1 {p1:.1f}, p2 {p2:.1f}; posterior SD g12 "
+          f"{math.sqrt(r['res'].P[-1][g12, g12]):.2f}")
+    lo, hi = COUPLED_BAND[0] * G12_TRUE, COUPLED_BAND[1] * G12_TRUE
+    assert lo <= f12 <= hi and lo <= s12 <= hi
+    assert abs(f21) < COUPLED_G21_BOUND and abs(s21) < COUPLED_G21_BOUND
+
+
+# ---- C2b: buffer protocol against an independent implementation ------------------------------------------
+
+def indep_deriv(X, delayed):
+    """Independent numpy §7.1 right-hand side of every sigma point of the 19-D M2 layout."""
+    jr = CFG["jansen_rit"]
+    a, b, C = jr["a"], jr["b"], jr["C"]
+    C1, C2, C3, C4 = (C * jr[f"C{i}_multiplier"] for i in (1, 2, 3, 4))
+    ab = CFG["priors"]["AB_product"]
+    out = np.zeros_like(X)
+    for i, x in enumerate(X):
+        p, lr, g12, g21 = (x[12], x[13]), (x[14], x[15]), x[16], x[17]
+        drive = (g21 * delayed[1], g12 * delayed[0])
+        for j in range(2):
+            y0, y1, y2, y3, y4, y5 = x[6 * j:6 * j + 6]
+            rho = math.exp(lr[j])
+            A, B = math.sqrt(ab * rho), math.sqrt(ab / rho)
+            out[i, 6 * j:6 * j + 6] = [
+                y3, y4, y5,
+                A * a * S(y1 - y2) - 2 * a * y3 - a * a * y0,
+                A * a * (p[j] + C2 * S(C1 * y0) + drive[j]) - 2 * a * y4 - a * a * y1,
+                B * b * C4 * S(C3 * y0) - 2 * b * y5 - b * b * y2]
+    return out
+
+
+def indep_step(x, P, hist, Wm, lam):
+    """One observation step with a plain-list history: hist[-1 - lag] is the entry `lag` sub-steps old.
+    Appends the predicted-mean S after each sub-step and returns the list of those four entries."""
+    dt = 1.0 / (CFG["preprocessing"]["observation_fs_hz"] * CFG["ukf"]["substeps_per_observation"])
+    delay = CFG["coupling"]["delay_substeps"]
+    X = ukf.sigma_points(x, P, lam)
+    added = []
+    for _ in range(CFG["ukf"]["substeps_per_observation"]):
+        k1 = indep_deriv(X, hist[-1 - delay])
+        k2 = indep_deriv(X + dt * k1, hist[-delay])
+        X = X + 0.5 * dt * (k1 + k2)
+        v = np.stack([X[:, 1] - X[:, 2], X[:, 7] - X[:, 8]], axis=1)
+        hist.append(S(Wm @ v))
+        added.append(hist[-1])
+    return added
+
+
+def test_buffer_protocol_matches_independent_history(layout):
+    """After three filter steps: lags 1-3 hold the predicted-mean S of the last step, lag 0 holds S of the
+    FILTERED mean, and every earlier step's 4th entry was replaced by its filtered-mean S while its
+    other three entries kept the predicted-mean S. Expected values come from a plain-list history and
+    a separate numpy right-hand side (indep_deriv), not from state_space."""
+    _, z = simulate_data(1, seed=3)
+    z = z[:3]
+    buf = ss.make_buffer(CFG)
+    res = ukf.run_filter(z, CFG, layout, Q_TEST, buffer=buf, keep_cov=True)
+    assert res.n_done == 3
+    lam, Wm, _ = ukf.weights_for(layout.n, CFG)
+    delay = CFG["coupling"]["delay_substeps"]
+    node = ss.initial_node_state(CFG)
+    s0 = S(node[1] - node[2])
+    hist = [np.array([s0, s0])] * (delay + 1)
+    x, P = ss.prior_mean(layout, CFG), ss.prior_cov(layout, CFG)
+    for t in range(3):
+        predicted = indep_step(x, P, hist, Wm, lam)
+        v = ss.potentials(res.x[t][None])[0]
+        hist[-1] = S(v)                                   # the filtered-mean entry replaces the 4th
+        x, P = res.x[t], res.P[t]
+    for lag in range(delay + 1):
+        np.testing.assert_allclose(buf.read(lag), hist[-1 - lag], rtol=1e-10, err_msg=f"lag {lag}")
+    for lag in (1, 2, 3):
+        np.testing.assert_allclose(buf.read(lag), predicted[3 - lag], rtol=1e-10)
+    assert np.abs(buf.read(0) - predicted[3]).max() > 1e-9      # lag 0 is the filtered S, not the predicted one
+
+
+# ---- C2b: divergence reference point ---------------------------------------------------------------------
+
+def test_divergence_is_measured_from_the_steady_state_not_from_zero(layout):
+    center = ss.initial_neural_state(CFG)
+    sd = np.sqrt(np.tile(ss.neural_variance(CFG), 2))
+    mult = CFG["ukf"]["divergence"]["state_sd_multiple"]
+    P = np.eye(layout.n)
+    x_prior = ss.prior_mean(layout, CFG)
+    checked = 0
+    for i in (0, 1, 2, 6, 7, 8):
+        def verdict(value):
+            x = x_prior.copy()
+            x[i] = value
+            return ukf._first_divergence(x, P, CFG, center, sd, 1.0)
+        assert verdict(center[i]) is None
+        assert verdict(center[i] + 0.95 * mult * sd[i]) is None
+        assert verdict(center[i] - 0.95 * mult * sd[i]) is None
+        assert verdict(center[i] + 1.05 * mult * sd[i]) == "state_beyond_sd_multiple"
+        assert verdict(center[i] - 1.05 * mult * sd[i]) == "state_beyond_sd_multiple"
+        if abs(center[i]) > 1.1 * mult * sd[i]:
+            # far from zero but AT the steady state: fine; AT zero but far from the steady state: diverged
+            assert verdict(center[i]) is None
+            assert verdict(0.0) == "state_beyond_sd_multiple"
+            checked += 1
+    assert checked >= 4          # y1 and y2 of both nodes have a steady state beyond 10 SD of zero
+
+
+# ---- C2b: reduction layouts ------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fix_ei", [False, True])
+@pytest.mark.parametrize("tie_p", [False, True])
+@pytest.mark.parametrize("tie_g", [False, True])
+@pytest.mark.parametrize("include_gains", [True, False])
+def test_every_switch_combination_runs_one_filter_step(fix_ei, tie_p, tie_g, include_gains):
+    cfg = copy.deepcopy(CFG)
+    cfg["state"]["reduction_switches"].update(fix_EI_terms=fix_ei, tie_p1_p2=tie_p, tie_g12_g21=tie_g)
+    lay = ss.make_layout(cfg, include_gains=include_gains)
+    # independent dimension count: 19 minus the removed quantities (a tie removes g21 only with gains)
+    n = 19 - 2 * fix_ei - tie_p - (2 if not include_gains else tie_g)
+    assert lay.n == n
+    Q, R = ukf.process_noise(lay, cfg, Q_TEST), ukf.obs_noise(cfg)
+    assert Q.shape == (n, n) and R.shape == (2, 2)
+    x0 = ss.prior_mean(lay, cfg)
+    assert ss.observe(x0, lay, cfg).shape == (2,) and ss.observe(np.tile(x0, (5, 1)), lay, cfg).shape == (5, 2)
+    _, z = simulate_data(1, seed=13)
+    res = ukf.run_filter(z[:1], cfg, lay, Q_TEST)
+    assert res.n_done == 1 and res.x.shape == (1, n) and np.isfinite(res.x).all()
+    assert not res.diverged and res.S.shape == (1, 2, 2)
+    # removed quantities have no Q entry: the parameter part of Q is 1e-3 * prior variance * dt, one per kept name
+    prior_var = np.diag(ss.prior_cov(lay, cfg))[12:]
+    assert len(lay.names[12:]) == n - 12
+    np.testing.assert_allclose(np.diag(Q)[12:], 1.0e-3 * prior_var / cfg["preprocessing"]["observation_fs_hz"],
+                               rtol=1e-14)
 
 
 # ---- hygiene -------------------------------------------------------------------------------------------

@@ -191,6 +191,17 @@ Done when tests show:
 Note (2026-09-29): done; src/ukf.py (own NumPy, filterpy 1.4.5 algorithm reproduced exactly), tests/test_ukf.py, IMP-019 to IMP-023. filterpy==1.4.5 is installed as a test oracle only; forward filter and smoother agree with it to rtol 1e-10. Measured on simulated data: mean NIS 1.82 at q = 1e-2; pure-NumPy timing for one 60,000-step recording (234 s): forward 68.8 s (1.15 ms/step), forward with covariances 69.6 s plus smoother 62.5 s = 132 s; min covariance eigenvalue 3.8e-6, NIS 1.84.
 Note for C4: the filter replicates filterpy, so NIS uses an S without Q (IMP-019); q acts on NIS only through P (the next step's sigma spread). The rule still picks the q whose NIS is closest to 2.
 
+### [x] C2b. Reviewer fixes to the UKF
+Read: §7.5, §9.3; the independent review of C1/C2 (commits 6d138d5, 0ca0de0, a655db1).
+Done when:
+- The divergence handler catches only numpy.linalg.LinAlgError; config errors and other exceptions propagate.
+- The §9.3 monitor includes the offending step's minimum eigenvalue.
+- The covariance jitter (1e-9 I) is used for the sigma points when the plain Cholesky fails; the filterpy oracle still agrees at rtol 1e-10.
+- delay_substeps >= substeps_per_observation is checked at construction.
+- New tests: coupled one-directional data, the buffer protocol against an independent history, the divergence reference point, per-point drift parameters, buffer entries after replace_latest, every reduction-switch combination, and the tightened seed-mean, y1 and gain bounds.
+
+Note (2026-09-29): done; IMP-024 to IMP-028, commit hashes of IMP-019 to IMP-023 filled in (a655db1). Mutation checks: restoring the broad catch, dropping the offending step from the monitor, and measuring the divergence from zero each make the new tests fail; the restored src/ukf.py is byte-identical (cmp). Measured: coupled test filtered g12 8.03 for a truth of 12 (g21 -0.15); the first attempt with p = (220, 260) tripped the 10 SD divergence rule (true node-2 mean y1 at 10.5 SD) and the asymmetry was reduced to (220, 235), band unchanged (IMP-026). Open finding for the pilot and G0: the 10 SD divergence rule is scaled by the small y1 SD, so nodes with a moderately shifted p or a moderate coupling drive are already flagged; look at this before real-data exclusions (§7.5, §12).
+
 ### [ ] C3. Two-pass parameter handling
 Read: §7.5 (parameter handling), §8.3, §10.2.
 Done when:
@@ -282,6 +293,7 @@ Done when:
 
 ### [ ] E4. Gate scoring and gate.json
 Read: §9.1–§9.4, §5.2, §18.1, §20.
+Note (C2b): the §9.3 identifiability check must report the posterior contraction of m. In observe() m is clipped to [0, 0.5] (IMP-016) and the prior spread (0.2 +- 0.66 at the sigma points) puts the two m-direction sigma points on the clip boundaries, so the filter sees less information about m; a poor contraction for m is a finding to log, not a reason to change the clip silently.
 Done when:
 - The positive-control rule is implemented: median NRMSE ≤ 0.25 and median gain error ≤ 15%, from the second-weakest level up.
 - The null δ-band rule is implemented, with δ = half the weakest level.

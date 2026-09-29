@@ -87,8 +87,21 @@ def log_rho_prior_mean(cfg):
     return float(np.log(cfg["jansen_rit"]["A"] / cfg["jansen_rit"]["B"]))
 
 
+def check_delay_guard(cfg):
+    """The buffer protocol needs delay_substeps >= substeps_per_observation: otherwise a
+    sub-step would read an entry written in the same observation step, and the filter
+    replacement and the smoother's forward-buffer snapshot would no longer be consistent
+    (IMP-027)."""
+    delay = cfg["coupling"]["delay_substeps"]
+    n_sub = cfg["ukf"]["substeps_per_observation"]
+    if delay < n_sub:
+        raise StateSpaceError(f"coupling.delay_substeps ({delay}) must be at least "
+                              f"ukf.substeps_per_observation ({n_sub})")
+
+
 def make_layout(cfg, include_gains=True):
     """Layout from the config reduction switches (§7.4). include_gains=False is M1."""
+    check_delay_guard(cfg)
     sw = cfg["state"]["reduction_switches"]
     drop = set()
     if sw["fix_EI_terms"]:
@@ -253,6 +266,7 @@ class DelayBuffer:
 
 def make_buffer(cfg):
     """A DelayBuffer of coupling.delay_substeps entries, filled with the steady-state S."""
+    check_delay_guard(cfg)
     buf = DelayBuffer(cfg["coupling"]["delay_substeps"])
     buf.reset(initial_buffer_fill(cfg))
     return buf
