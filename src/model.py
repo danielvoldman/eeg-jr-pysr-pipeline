@@ -22,6 +22,8 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit
 
+from src.config import ConfigError
+
 STATE_NAMES = ("y0", "y1", "y2", "y3", "y4", "y5")
 N_STATES = len(STATE_NAMES)
 Y0, Y1, Y2, Y3, Y4, Y5 = range(N_STATES)
@@ -104,6 +106,14 @@ def jr_rhs(y, p_in, drive, A, B, cfg):
 
 # ---- steady state ------------------------------------------------------------
 
+def _count_grid_roots(g):
+    """Roots of a scanned residual: each exact zero on a grid point counts once, and each
+    strict sign change between neighbours counts once. A zero never forms a strict sign
+    change with its neighbours, so a root on a grid point is not counted twice."""
+    sign = np.sign(g)
+    return int(np.count_nonzero(sign[:-1] * sign[1:] < 0.0) + np.count_nonzero(sign == 0.0))
+
+
 def steady_state(p, A, B, cfg):
     """Deterministic fixed point of one uncoupled node at input p (y3 = y4 = y5 = 0).
 
@@ -122,7 +132,7 @@ def steady_state(p, A, B, cfg):
 
     grid = np.linspace(0.0, 2.0 * k["e0"] * A / k["a"], int(sim["steady_state_scan_points"]))
     g = residual(grid)[0]
-    n_roots = int(np.count_nonzero(g[:-1] * g[1:] < 0.0) + np.count_nonzero(g == 0.0))
+    n_roots = _count_grid_roots(g)
     if n_roots != 1:
         raise ModelError(f"steady_state: {n_roots} roots at p={p}, A={A}, B={B}; need exactly 1")
     zero = np.flatnonzero(g == 0.0)
@@ -206,9 +216,19 @@ def simulate(cfg, n_steps, seed=None, *, input=None, n_nodes=2, p=None, A=None, 
     (a pre-drawn (n_steps, n_nodes) array). p, A, B are scalars or per-node arrays and
     default to the §7.3 values; `half_width` overrides the input uniform half-width.
     The history buffer is pre-filled with each node's steady-state S (§7.5), and the
-    default initial state is each node's steady state. `kernel` selects the time loop
-    (default: the compiled one; pass `_simulate_kernel.py_func` for pure Python).
+    default initial state is each node's steady state. `kernel` is a test hook: it
+    replaces the time loop (default: the compiled one; tests pass
+    `_simulate_kernel.py_func` for pure Python) and is not part of the simulator API.
+    Raises ConfigError unless the reference-simulation integrator is "heun" and the
+    noise redraw interval is "every step", the only scheme implemented (IMP-003).
     """
+    ref = cfg["rescaling"]["reference_simulation"]
+    if ref["integrator"] != "heun":
+        raise ConfigError(f"rescaling.reference_simulation.integrator is {ref['integrator']!r}; "
+                          "only 'heun' is implemented")
+    if ref["noise_redraw_interval"] != "every step":
+        raise ConfigError("rescaling.reference_simulation.noise_redraw_interval is "
+                          f"{ref['noise_redraw_interval']!r}; only 'every step' is implemented")
     if (seed is None) == (input is None):
         raise ModelError("give exactly one of seed or input")
     if n_nodes not in (1, 2):

@@ -7,7 +7,7 @@ import pytest
 
 from conftest import REPO_ROOT
 from src import model
-from src.config import load_config
+from src.config import ConfigError, load_config
 
 CFG = load_config(REPO_ROOT / "config.yml")
 K = model.constants(CFG)
@@ -98,6 +98,15 @@ def test_steady_state_raises_when_several_roots():
         model.steady_state(0.0, 3.25, 22.0, CFG)
 
 
+def test_grid_root_count_does_not_double_count_an_exact_zero():
+    count = model._count_grid_roots
+    assert count(np.array([1.0, 0.0, -1.0])) == 1         # zero between a + and a - side
+    assert count(np.array([-2.0, 0.0, 3.0, 4.0])) == 1
+    assert count(np.array([1.0, -1.0, -2.0])) == 1        # plain crossing, no zero
+    assert count(np.array([1.0, -1.0, 0.0, -1.0])) == 2   # crossing plus a separate zero
+    assert count(np.array([1.0, 1.0, 1.0])) == 0
+
+
 # ---- integrator: independence, delay, determinism ----------------------------
 
 def test_uncoupled_two_node_equals_two_single_nodes():
@@ -131,6 +140,154 @@ def test_delayed_coupling_reads_exactly_d_steps_back(delay):
     first = int(np.flatnonzero(hit.drive[:, 1] != ref.drive[:, 1])[0])
     assert first == k0 + 1 + delay
     assert np.array_equal(hit.drive[:first, 1], ref.drive[:first, 1])
+
+
+# ---- independent two-node Heun reference (plain math, no numpy in the stepping) -------
+#
+# Derivation of the stage-2 delayed read. Let S_k = S(y1 - y2) of the state at step k, and
+# d the delay in steps; S_k for k < 0 is the steady-state fill. Heun advances y_k -> y_{k+1}:
+#   stage 1 evaluates the RHS at t_k,      with delayed drive g * S(t_k - d dt)     = g * S_{k-d}
+#   stage 2 evaluates the RHS at t_{k+1},  with delayed drive g * S(t_{k+1} - d dt) = g * S_{k+1-d}
+# so the stage-2 index is the stage-1 index plus one. Since d >= 1, k + 1 - d <= k and S_{k+1-d}
+# is already known when step k is taken: the scheme stays explicit. Reading S_{k-d} in stage 2
+# as well would make the second stage a stale copy of the first.
+
+_RJ = CFG["jansen_rit"]
+_C = _RJ["C"]
+_a, _b = float(_RJ["a"]), float(_RJ["b"])
+_C1, _C2 = float(_C * _RJ["C1_multiplier"]), float(_C * _RJ["C2_multiplier"])
+_C3, _C4 = float(_C * _RJ["C3_multiplier"]), float(_C * _RJ["C4_multiplier"])
+_e0, _v0, _r = float(_RJ["e0"]), float(_RJ["v0"]), float(_RJ["r"])
+
+
+def _ref_sig(v):
+    return 2.0 * _e0 / (1.0 + math.exp(_r * (_v0 - v)))
+
+
+def _ref_rhs(y, p_in, drive, A, B):
+    return [
+        y[3],
+        y[4],
+        y[5],
+        A * _a * _ref_sig(y[1] - y[2]) - 2.0 * _a * y[3] - _a * _a * y[0],
+        A * _a * (p_in + _C2 * _ref_sig(_C1 * y[0]) + drive) - 2.0 * _a * y[4] - _a * _a * y[1],
+        B * _b * _C4 * _ref_sig(_C3 * y[0]) - 2.0 * _b * y[5] - _b * _b * y[2],
+    ]
+
+
+def _ref_steady(p, A, B):
+    """Root of y0 = (A/a) S(y1 - y2) by plain bisection (single root at p = 220)."""
+    def res(y0):
+        y1 = (A / _a) * (p + _C2 * _ref_sig(_C1 * y0))
+        y2 = (B / _b) * _C4 * _ref_sig(_C3 * y0)
+        return y0 - (A / _a) * _ref_sig(y1 - y2), y1, y2
+    lo, hi = 0.0, 2.0 * _e0 * A / _a
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if res(mid)[0] * res(lo)[0] < 0.0:
+            hi = mid
+        else:
+            lo = mid
+    y0 = 0.5 * (lo + hi)
+    _, y1, y2 = res(y0)
+    return [y0, y1, y2, 0.0, 0.0, 0.0]
+
+
+def _ref_simulate(u, g12, g21, delay, p, A, B):
+    """u: list of [u_node1, u_node2] per step. Returns states[k][node] = six floats."""
+    dt = 1.0 / FS
+    y = [_ref_steady(p, A, B), _ref_steady(p, A, B)]
+    s_fill = _ref_sig(y[0][1] - y[0][2])
+    states = [[list(y[0]), list(y[1])]]
+    s_hist = []
+    gain = [[0.0, g21], [g12, 0.0]]   # gain[j][i]: from node i to node j (g12: 1 -> 2)
+
+    def s_at(step):
+        return s_fill if step < 0 else s_hist[step]
+
+    for k, u_k in enumerate(u):
+        s_hist.append([_ref_sig(n[1] - n[2]) for n in states[k]])
+        s_hist[k] = tuple(s_hist[k])
+        new = []
+        for j in range(2):
+            d1 = sum(gain[j][i] * (s_fill if k - delay < 0 else s_hist[k - delay][i]) for i in range(2))
+            d2 = sum(gain[j][i] * (s_fill if k + 1 - delay < 0 else s_hist[k + 1 - delay][i])
+                     for i in range(2))
+            y_k = states[k][j]
+            k1 = _ref_rhs(y_k, u_k[j], d1, A, B)
+            y_pred = [y_k[m] + dt * k1[m] for m in range(6)]
+            k2 = _ref_rhs(y_pred, u_k[j], d2, A, B)
+            new.append([y_k[m] + 0.5 * dt * (k1[m] + k2[m]) for m in range(6)])
+        states.append(new)
+    return states
+
+
+def _ref_inputs(n_steps, seed=21):
+    rng = np.random.default_rng(seed)
+    return rng.uniform(120.0, 320.0, size=(n_steps, 2))
+
+
+def test_two_node_heun_matches_independent_reference_including_stage2_delayed_read():
+    n_steps, delay, g12, g21 = 50, 3, 10.0, -6.0
+    cfg = copy.deepcopy(CFG)
+    cfg["coupling"]["sim_delay_steps"] = delay
+    u = _ref_inputs(n_steps)
+    real = model.simulate(cfg, n_steps, input=u, g12=g12, g21=g21)
+    ref = _ref_simulate(u.tolist(), g12, g21, delay, _RJ["p_mean"], _RJ["A"], _RJ["B"])
+    want = np.array(ref, dtype=np.float64)
+    assert want.shape == real.states.shape
+    np.testing.assert_allclose(real.states, want, rtol=1e-12, atol=0.0)
+
+
+def test_coupling_reaches_node2_y4_at_the_step_the_reference_predicts():
+    # The pulse is in node 1's input at step k0. Node 1's S first differs at step k0 + 1.
+    # Node 2's stage-2 read at step k is S_{k+1-d}, so it first differs at k = k0 + d and
+    # states[k0 + d + 1] is the first row to deviate; only y4 is fed directly (stage 1 is
+    # still unperturbed there, and y1' = y4 of the predictor).
+    n_steps, delay, k0, g12 = 40, 3, 10, 10.0
+    cfg = copy.deepcopy(CFG)
+    cfg["coupling"]["sim_delay_steps"] = delay
+    base = _ref_inputs(n_steps)
+    pulse = base.copy()
+    pulse[k0, 0] += 1000.0
+
+    def first_dev_ref(a, b):
+        for k in range(len(a)):
+            if a[k][1][4] != b[k][1][4]:
+                return k
+        return None
+
+    args = (delay, _RJ["p_mean"], _RJ["A"], _RJ["B"])
+    r0 = _ref_simulate(base.tolist(), g12, 0.0, *args)
+    r1 = _ref_simulate(pulse.tolist(), g12, 0.0, *args)
+    predicted = first_dev_ref(r0, r1)
+    assert predicted == k0 + delay + 1
+    # The baseline is the coupled run without the pulse: with g12 != 0 the pre-filled
+    # history already drives node 2 (g12 * S_steady), so it differs from a g = 0 run from
+    # step 1 on. Node 1 is the same in both, so the pulse response is what separates them.
+    quiet = model.simulate(cfg, n_steps, input=base, g12=g12, g21=0.0)
+    hit = model.simulate(cfg, n_steps, input=pulse, g12=g12, g21=0.0)
+    dev = np.flatnonzero(hit.states[:, 1, model.Y4] != quiet.states[:, 1, model.Y4])
+    assert int(dev[0]) == predicted
+    # and with g12 = 0 the pulse never reaches node 2
+    off_q = model.simulate(cfg, n_steps, input=base, g12=0.0, g21=0.0)
+    off_h = model.simulate(cfg, n_steps, input=pulse, g12=0.0, g21=0.0)
+    assert np.array_equal(off_h.states[:, 1], off_q.states[:, 1])
+
+
+# ---- config guards and consistency ---------------------------------------------
+
+@pytest.mark.parametrize("key, bad", [("integrator", "rk4"), ("noise_redraw_interval", "every 10 steps")])
+def test_simulate_rejects_unimplemented_integrator_or_redraw_interval(key, bad):
+    cfg = copy.deepcopy(CFG)
+    cfg["rescaling"]["reference_simulation"][key] = bad
+    with pytest.raises(ConfigError, match=key):
+        model.simulate(cfg, 4, seed=1)
+
+
+def test_reference_sim_rate_equals_generation_rate():
+    assert (CFG["rescaling"]["reference_simulation"]["sim_fs_hz"]
+            == CFG["g0"]["generation_fs_hz"])
 
 
 def test_same_seed_bit_identical_different_seed_differs():
