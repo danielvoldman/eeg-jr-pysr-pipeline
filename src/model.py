@@ -15,14 +15,25 @@ node 2 from node 1 and g21 drives node 1 from node 2.
 
 Integrator (IMP-003): Heun, with the input drawn once per step and held constant
 within the step. The delayed coupling in the second Heun stage reads the history
-one step later than the first stage. Nothing here imports scipy or preprocess.py.
+one step later than the first stage. The simulator imports no scipy. The reference
+constants (A4, §5.1) import src.preprocess, never the reverse (§18).
 """
+import argparse
+import json
+import logging
+import re
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
+from importlib import metadata
+from pathlib import Path
 
 import numpy as np
 from numba import njit
 
-from src.config import ConfigError
+from src import preprocess
+from src.config import DEFAULT_CONFIG_PATH, REPO_ROOT, ConfigError, load_config
 
 STATE_NAMES = ("y0", "y1", "y2", "y3", "y4", "y5")
 N_STATES = len(STATE_NAMES)
@@ -266,3 +277,284 @@ def simulate(cfg, n_steps, seed=None, *, input=None, n_nodes=2, p=None, A=None, 
                         k["e0"], k["v0"], k["r"])
     return SimResult(states=states, output=states[..., Y1] - states[..., Y2],
                      input=u_in, drive=drive, fs_hz=fs)
+
+
+# ---- reference constants mu_ref, sigma_ref (PLAN.md A4; §5.1, §7.6; IMP-005) ----
+
+log = logging.getLogger(__name__)
+UNITS = "mV (model output units)"
+_CONFIG_LEAVES = ("mu_ref", "sigma_ref", "computed_provenance")
+
+
+def simulate_reference(cfg, seed=None):
+    """Single-node reference series: burn_in_s + duration_s simulated, burn-in discarded.
+
+    Returns exactly duration_s * sim_fs_hz samples of the UNFILTERED y1 - y2 at the
+    post-step values (row 0 of the simulator output, the initial state, is dropped).
+    """
+    ref = cfg["rescaling"]["reference_simulation"]
+    if ref["node_structure"] != "single node":
+        raise ConfigError(f"node_structure is {ref['node_structure']!r}; only 'single node' is implemented")
+    fs = ref["sim_fs_hz"]
+    n_burn = int(round(ref["burn_in_s"] * fs))
+    n_keep = int(round(ref["duration_s"] * fs))
+    seed = ref["seed"] if seed is None else seed
+    res = simulate(cfg, n_burn + n_keep, seed=seed, n_nodes=1, p=ref["p_s_inv"])
+    y = np.ascontiguousarray(res.output[1 + n_burn:, 0], dtype=np.float64)
+    if y.size != n_keep:
+        raise ModelError(f"kept {y.size} samples, expected {n_keep}")
+    return y
+
+
+def _filtered_trimmed(cfg, y, fs_hz):
+    """0.5-45 Hz band-pass at fs_hz, downsample to the observation rate, trim both ends."""
+    y = np.asarray(y, dtype=np.float64)
+    fs_obs = cfg["preprocessing"]["observation_fs_hz"]
+    trim = int(round(cfg["rescaling"]["reference_simulation"]["edge_trim_s"] * fs_obs))
+    z = preprocess.downsample(cfg, preprocess.bandpass(cfg, y, fs_hz), fs_hz)
+    if z.size <= 2 * trim:
+        raise ModelError(f"{z.size} samples at {fs_obs} Hz do not exceed twice the trim ({trim})")
+    return z[trim:z.size - trim]
+
+
+def reference_statistics(cfg, y, fs_hz):
+    """(mu, sigma) of a series: mean of the unfiltered y; SD (ddof from config) of the
+    band-passed, downsampled, edge-trimmed series (§5.1). B5's per-recording rescaling
+    must use the same SD convention."""
+    z = _filtered_trimmed(cfg, y, fs_hz)
+    ddof = cfg["rescaling"]["reference_simulation"]["ddof"]
+    return float(np.mean(y)), float(np.std(z, ddof=ddof))
+
+
+def compute_reference_constants(cfg, seed=None, keep_series=False):
+    """Simulate, then the same statistics as reference_statistics. Returns a dict; the
+    unfiltered series only if asked."""
+    ref = cfg["rescaling"]["reference_simulation"]
+    seed = ref["seed"] if seed is None else seed
+    t0 = time.perf_counter()
+    y = simulate_reference(cfg, seed)
+    t1 = time.perf_counter()
+    z = _filtered_trimmed(cfg, y, ref["sim_fs_hz"])
+    mu = float(np.mean(y))
+    sigma = float(np.std(z, ddof=ref["ddof"]))
+    t2 = time.perf_counter()
+    out = {"mu_ref": mu, "sigma_ref": sigma, "seed": seed,
+           "n_mu_samples": int(y.size), "n_sigma_samples": int(z.size),
+           "simulate_s": t1 - t0, "statistics_s": t2 - t1}
+    if keep_series:
+        out["series"] = y
+    return out
+
+
+def _alpha_peak_hz(z, fs_hz, segment_s):
+    """Highest periodogram bin (DC excluded): non-overlapping Hann segments, numpy only."""
+    nseg = int(round(segment_s * fs_hz))
+    nblk = z.size // nseg
+    blocks = z[:nblk * nseg].reshape(nblk, nseg)
+    blocks = (blocks - blocks.mean(axis=1, keepdims=True)) * np.hanning(nseg)
+    psd = np.mean(np.abs(np.fft.rfft(blocks, axis=1)) ** 2, axis=0)
+    freqs = np.fft.rfftfreq(nseg, 1.0 / fs_hz)
+    return float(freqs[1 + int(np.argmax(psd[1:]))])
+
+
+def reference_diagnostics(cfg, main_result):
+    """Printed-only diagnostics; never stored, never used to change a constant.
+
+    `main_result` must come from compute_reference_constants(keep_series=True).
+    """
+    ref = cfg["rescaling"]["reference_simulation"]
+    y = main_result["series"]
+    z = _filtered_trimmed(cfg, y, ref["sim_fs_hz"])
+    fs_obs = cfg["preprocessing"]["observation_fs_hz"]
+    ddof = ref["ddof"]
+    t0 = time.perf_counter()
+    rows = [(main_result["seed"], main_result["mu_ref"], main_result["sigma_ref"])]
+    for sd in ref["diagnostic_seeds"]:
+        r = compute_reference_constants(cfg, seed=sd)
+        rows.append((sd, r["mu_ref"], r["sigma_ref"]))
+    mus = np.array([r[1] for r in rows])
+    sigmas = np.array([r[2] for r in rows])
+    return {
+        "unfiltered_sd": float(np.std(y, ddof=ddof)),
+        "filtered_sd": float(np.std(z, ddof=ddof)),
+        "mean_2048": float(np.mean(y)),
+        "mean_256": float(np.mean(preprocess.downsample(cfg, y, ref["sim_fs_hz"]))),
+        "alpha_peak_hz": _alpha_peak_hz(z, fs_obs, cfg["simulator"]["sanity_welch_segment_s"]),
+        "seed_rows": rows,
+        "mu_spread": float(mus.max() - mus.min()),
+        "mu_rel_spread": float((mus.max() - mus.min()) / abs(mus.mean())),
+        "sigma_spread": float(sigmas.max() - sigmas.min()),
+        "sigma_rel_spread": float((sigmas.max() - sigmas.min()) / abs(sigmas.mean())),
+        "seeds_s": time.perf_counter() - t0,
+    }
+
+
+# ---- git state and provenance ---------------------------------------------------
+
+def _git(args):
+    """Stdout of a git command run in the repo root (a test hook: tests monkeypatch it)."""
+    done = subprocess.run(["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
+    return done.stdout
+
+
+def git_state():
+    """(HEAD hash, dirty flag); dirty means `git status --porcelain` is not empty."""
+    return _git(["rev-parse", "HEAD"]).strip(), bool(_git(["status", "--porcelain"]).strip())
+
+
+def check_git_state(expect_commit):
+    """Real write only: refuse unless the tree is clean and HEAD is the expected commit."""
+    head, dirty = git_state()
+    if dirty:
+        raise ModelError("refusing to write: `git status --porcelain` is not empty; commit first "
+                         "(the provenance leaf stores the git hash)")
+    if head != expect_commit:
+        raise ModelError(f"refusing to write: HEAD is {head}, expected {expect_commit}")
+    return head
+
+
+def provenance_record(cfg, result, git_hash, dirty):
+    ref = cfg["rescaling"]["reference_simulation"]
+    return {
+        "seed": result["seed"],
+        "kept_duration_s": ref["duration_s"],
+        "burn_in_s": ref["burn_in_s"],
+        "sim_fs_hz": ref["sim_fs_hz"],
+        "observation_fs_hz": cfg["preprocessing"]["observation_fs_hz"],
+        "edge_trim_s": ref["edge_trim_s"],
+        "ddof": ref["ddof"],
+        "n_mu_samples": result["n_mu_samples"],
+        "n_sigma_samples": result["n_sigma_samples"],
+        "units": UNITS,
+        "git_commit": git_hash,
+        "git_dirty": dirty,
+        "numpy": metadata.version("numpy"),
+        "scipy": metadata.version("scipy"),
+        "numba": metadata.version("numba"),
+    }
+
+
+# ---- config writer ----------------------------------------------------------------
+
+def yaml_float(x):
+    """repr() of a float in a form PyYAML reads as a float (a dot is required)."""
+    x = float(x)
+    if not np.isfinite(x):
+        raise ModelError(f"cannot write non-finite value {x}")
+    text = repr(x)
+    if "e" in text and "." not in text:
+        mant, exp = text.split("e")
+        text = f"{mant}.0e{exp}"
+    return text
+
+
+def write_reference_constants(config_path, mu, sigma, provenance, force=False):
+    """Replace only the `value:` of rescaling.{mu_ref, sigma_ref, computed_provenance}.
+
+    Targeted text replacement; every other byte is preserved and yaml.dump is never
+    used. Refuses when a value is not null unless `force`.
+    """
+    path = Path(config_path)
+    lines = path.read_bytes().decode("utf-8").splitlines(keepends=True)
+    new_values = {"mu_ref": yaml_float(mu), "sigma_ref": yaml_float(sigma),
+                  "computed_provenance": json.dumps(provenance)}
+    hits = {}
+    for i, line in enumerate(lines):
+        m = re.match(r"^  (mu_ref|sigma_ref|computed_provenance): \{value: (.*?)(?=, prov:)", line)
+        if m:
+            if m.group(1) in hits:
+                raise ModelError(f"leaf {m.group(1)} appears twice in {path}")
+            hits[m.group(1)] = (i, m)
+    missing = [k for k in _CONFIG_LEAVES if k not in hits]
+    if missing:
+        raise ModelError(f"leaves not found in {path}: {missing}")
+    filled = [k for k in _CONFIG_LEAVES if hits[k][1].group(2) != "null"]
+    if filled and not force:
+        raise ModelError(f"refusing to overwrite non-null {filled}; pass --force, and then the "
+                         "overwrite must be logged in DEVIATIONS.md section 1")
+    if filled:
+        log.warning("OVERWRITING %s: log this in DEVIATIONS.md section 1", filled)
+    for key, (i, m) in hits.items():
+        lines[i] = lines[i][:m.start(2)] + new_values[key] + lines[i][m.end(2):]
+    path.write_bytes("".join(lines).encode("utf-8"))
+
+
+# ---- command line -------------------------------------------------------------------
+
+def _fmt(x):
+    return f"{x:.12g}"
+
+
+def _report(cfg, result, diag, head, dirty):
+    ref = cfg["rescaling"]["reference_simulation"]
+    fs_obs = cfg["preprocessing"]["observation_fs_hz"]
+    out = [
+        f"units: {UNITS}",
+        f"git HEAD {head}, tree dirty: {dirty}",
+        f"seed {result['seed']}: single node, p={ref['p_s_inv']}, {ref['burn_in_s']} s burn-in discarded, "
+        f"{ref['duration_s']} s kept at {ref['sim_fs_hz']} Hz",
+        f"mu_ref    = {_fmt(result['mu_ref'])} mV   ({result['n_mu_samples']} samples = "
+        f"{ref['duration_s']} s x {ref['sim_fs_hz']} Hz, unfiltered mean)",
+        f"sigma_ref = {_fmt(result['sigma_ref'])} mV   ({result['n_sigma_samples']} samples = "
+        f"{result['n_sigma_samples'] / fs_obs:g} s x {fs_obs} Hz after band-pass, downsample, "
+        f"{ref['edge_trim_s']} s trim per end; ddof={ref['ddof']})",
+        f"wall-clock: simulate {result['simulate_s']:.2f} s, band-pass + downsample + statistics "
+        f"{result['statistics_s']:.2f} s, five extra seeds {diag['seeds_s']:.2f} s",
+        "diagnostics (printed only, not stored):",
+        f"  SD unfiltered {_fmt(diag['unfiltered_sd'])} mV vs SD filtered {_fmt(diag['filtered_sd'])} mV",
+        f"  mean at {ref['sim_fs_hz']} Hz {_fmt(diag['mean_2048'])} mV vs mean at {fs_obs} Hz "
+        f"{_fmt(diag['mean_256'])} mV (untrimmed)",
+        f"  alpha peak (highest periodogram bin, DC excluded, {cfg['simulator']['sanity_welch_segment_s']} s "
+        f"Hann segments): {_fmt(diag['alpha_peak_hz'])} Hz",
+        f"  {'seed':>6} {'mu (mV)':>20} {'sigma (mV)':>20}",
+    ]
+    out += [f"  {sd:>6} {_fmt(mu):>20} {_fmt(sg):>20}" for sd, mu, sg in diag["seed_rows"]]
+    out += [
+        f"  spread (max - min): mu {_fmt(diag['mu_spread'])} mV, sigma {_fmt(diag['sigma_spread'])} mV",
+        f"  relative spread ((max - min) / |mean over the {len(diag['seed_rows'])} seeds|): "
+        f"mu {_fmt(diag['mu_rel_spread'])}, sigma {_fmt(diag['sigma_rel_spread'])}",
+    ]
+    return "\n".join(out)
+
+
+def main(argv=None, config_path=None):
+    parser = argparse.ArgumentParser(prog="python -m src.model")
+    parser.add_argument("--compute-reference", action="store_true", required=True)
+    parser.add_argument("--dry-run", action="store_true", help="compute and print; write nothing")
+    parser.add_argument("--force", action="store_true", help="overwrite non-null constants")
+    parser.add_argument("--expect-commit", help="required for a real write: the HEAD hash the "
+                        "approved dry run was made at")
+    args = parser.parse_args(argv)
+    if not args.dry_run and not args.expect_commit:
+        parser.error("a real write needs --expect-commit <hash of the approved dry run>")
+    if not log.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    config_path = DEFAULT_CONFIG_PATH if config_path is None else Path(config_path)
+    cfg = load_config(config_path)
+    try:
+        if not args.dry_run:
+            check_git_state(args.expect_commit)
+            filled = [k for k in _CONFIG_LEAVES if cfg["rescaling"][k] is not None]
+            if filled and not args.force:
+                raise ModelError(f"refusing to overwrite non-null {filled}; pass --force")
+        result = compute_reference_constants(cfg, keep_series=True)
+        diag = reference_diagnostics(cfg, result)
+        head, dirty = git_state()
+        log.info(_report(cfg, result, diag, head, dirty))
+        if args.dry_run:
+            log.info("dry run: nothing written")
+            return 0
+        write_reference_constants(config_path, result["mu_ref"], result["sigma_ref"],
+                                  provenance_record(cfg, result, head, dirty), force=args.force)
+        log.info("written to %s", config_path)
+        return 0
+    except ModelError as exc:
+        log.error("%s", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

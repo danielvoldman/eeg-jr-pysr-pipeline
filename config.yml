@@ -112,6 +112,7 @@ preprocessing:
 rescaling:
   mu_ref: {value: null, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "mean of the UNFILTERED simulated y1-y2; written by PLAN.md step A4"}
   sigma_ref: {value: null, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "SD of the output after the 0.5-45 Hz band-pass and 256 Hz downsampling; written by step A4"}
+  computed_provenance: {value: null, prov: computed, ref: "§5.1", note: "IMP-005; seed, kept duration, burn-in, rates, trim, ddof, git hash and dirty flag, library versions, units; written together with mu_ref and sigma_ref"}
   reference_simulation:
     p_s_inv: {value: 220, prov: locked, ref: "§5.1"}
     input_noise_uniform_low_s_inv: {value: 120, prov: literature, ref: "§5.1, §7.3"}
@@ -120,10 +121,13 @@ rescaling:
     sim_fs_hz: {value: 2048, prov: locked, ref: "§5.1"}
     parameters: {value: "standard §7.3 parameters", prov: locked, ref: "§5.1"}
     seed: {value: 42, prov: placeholder, ref: "§5.1", note: "IMP-003; the document gives no seed"}
-    burn_in_s: {value: 10, prov: placeholder, ref: "§5.1", note: "IMP-003; whether duration_s includes it is deferred to A4"}
+    burn_in_s: {value: 10, prov: placeholder, ref: "§5.1", note: "IMP-003, IMP-005; excluded from duration_s: 10 s burn-in is simulated first and discarded, then exactly duration_s is kept"}
     node_structure: {value: "single node", prov: placeholder, ref: "§5.1", note: "IMP-003; standard §7.3 parameters, no mixing, no coupling"}
     integrator: {value: "heun", prov: placeholder, ref: "§5.1, §7.6, §9.1", note: "IMP-003; second order, input drawn once per step and held constant within the step"}
     noise_redraw_interval: {value: "every step", prov: placeholder, ref: "§5.1", note: "IMP-003; fresh uniform draw at every 2048-Hz integration step"}
+    edge_trim_s: {value: 5, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-005; trimmed from EACH end of the 256-Hz filtered series before sigma_ref"}
+    ddof: {value: 1, prov: placeholder, ref: "§5.1", note: "IMP-005; sample SD; B5's per-recording rescaling must use the same convention"}
+    diagnostic_seeds: {value: [43, 44, 45, 46, 47], prov: placeholder, ref: "§5.1", note: "IMP-005; printed spread only, never stored in the constants"}
 
 # ---------------------------------------------------------------- Jansen-Rit constants (§7.3)
 jansen_rit:
