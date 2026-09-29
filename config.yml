@@ -215,7 +215,7 @@ coupling:
   delay_ms_nominal: {value: 10.0, prov: placeholder, ref: "§7.3", note: "inter-node delay, both directions, fixed"}
   delay_substeps: {value: 10, prov: placeholder, ref: "§7.5, §7.6", note: "at 1024 Hz effective step this is about 9.77 ms"}
   sim_delay_steps: {value: 20, prov: placeholder, ref: "§7.5, §9.1", note: "IMP-003; simulator delay in 2048-Hz steps = 9.765625 ms, equal to the UKF's 10 sub-steps at 1024 Hz"}
-  gain_prior_mean: {value: 0.0, prov: placeholder, ref: "§7.3, §7.6", unit: "1/s"}
+  gain_prior_mean: {value: 0.0, prov: placeholder, ref: "§7.3, §7.6", unit: "dimensionless", note: "IMP-014; the gain multiplies S (already in 1/s), so g is dimensionless"}
   gain_prior_sd_factor_of_C2: {value: 0.1, prov: placeholder, ref: "§7.3, §7.6", note: "SD = 0.1*C2 = 10.8 1/s"}
   common_input_term_in_fitted_model: {value: false, prov: locked, ref: "§7.2"}
   base_form: {value: "sigmoid of delayed pyramidal output, times gain, added inside the p bracket of y4", prov: locked, ref: "§8.1"}
@@ -272,6 +272,9 @@ ukf:
   initial_state:
     method: {value: "deterministic steady state at prior parameter means", prov: placeholder, ref: "§7.6"}
     covariance_sim_duration_s: {value: 600, prov: placeholder, ref: "§7.6", note: "per-state variance from a noise-driven simulation at literature parameters"}
+    covariance_seed: {value: 42, prov: placeholder, ref: "§7.6", note: "IMP-017; the document gives no seed; g=0 two-node run, 10 s burn-in (rescaling.reference_simulation.burn_in_s) discarded"}
+    neural_variance: {value: null, prov: computed, ref: "§7.6", unit: "mV^2, mV^2/s^2, mV^2/s^4", note: "IMP-017; per-state variance of y0..y5 (ddof 1), pooled over the two nodes, shared by both nodes; written by python -m src.state_space --compute-initial-covariance"}
+    neural_variance_provenance: {value: null, prov: computed, ref: "§7.6", note: "IMP-017; seed, duration, burn-in, rate, ddof, sample counts, git hash and dirty flag, library versions"}
   divergence:
     covariance_jitter: {value: 1.0e-9, prov: locked, ref: "§7.5"}
     state_sd_multiple: {value: 10, prov: locked, ref: "§7.5"}

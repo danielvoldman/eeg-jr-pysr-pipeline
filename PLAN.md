@@ -163,7 +163,7 @@ Note (2026-09-29): done. Rules applied per recording in this order: units check,
 
 Note: Before any phase >= 2 gets a real runner: check_prerequisite must also read outputs/gate.json and carry any low_confidence flag forward (CLAUDE.md rule 6, §18.1). Add tqdm progress bars when phases have real work (§18).
 
-### [ ] C1. Augmented state-space model
+### [x] C1. Augmented state-space model
 Read: §7.2, §7.4, §7.6.
 Done when:
 - The 19-D state is 12 neural states plus p₁, p₂, ρ₁, ρ₂, g₁₂, g₂₁ and m.
@@ -172,6 +172,10 @@ Done when:
 - The priors match §7.6, with m truncated to [0, 0.5].
 - The M1 variant has 17 dimensions (gains removed).
 - The §7.4 reduction order is available as config switches.
+
+Note (2026-09-29): done; src/state_space.py, tests/test_state_space.py (model.py untouched), IMP-014 to IMP-018. Layouts 19 (M2), 17 (M1), and the §7.4 switches compose through the same code path. Observation model B: y_obs = mu_ref + M (y - mu_ref) (IMP-015). m is a raw Gaussian in the state and is clipped to [0, 0.5] only inside observe() (IMP-016). The per-state initial variance is stored in config by a second commit (IMP-017). No filter, smoother, Q/R or sigma-point code.
+Note for Stage E (E2): the G0 generator must mix the deviations from mu_ref with M(m) and then rescale, to match the fitted observation model (IMP-015).
+Note for C3: clipping of the REPORTED recording-level m to [0, 0.5] is decided in C3 (IMP-016).
 
 ### [ ] C2. Reference UKF and smoother (filterpy)
 Read: §7.5, §7.6, §9.3.
