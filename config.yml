@@ -1,0 +1,393 @@
+# config.yml
+# Source of truth: PREREGISTRATION.md (planning document v0.6, 2026-09-27). Section numbers below refer to it.
+#
+# FORMAT. Every parameter is a leaf of the form:  name: {value: ..., prov: <tag>, ref: "§x.y"}
+# An optional `unit:` or `note:` may be added. Code reads only `value`; `prov` and `ref` are the record.
+# YAML NOTE. Write floats in exponent form with a dot (1.0e-4, never 1e-4), or PyYAML reads them as strings.
+#
+# PROVENANCE TAGS (prov)
+#   literature   value taken from a published source (mainly §7.3, Jansen & Rit 1995)
+#   locked       design decision tagged LOCKED in the document (or fixed by it without a separate tag)
+#   placeholder  PLACEHOLDER default; the pilot may recalibrate it (Stage J in PLAN.md)
+#   computed     produced by code and written back here (mu_ref, sigma_ref)
+#   fitted       produced by fitting to data; nothing is fitted yet
+#   unset        the document gives no value. Code must STOP AND ASK, then log the choice
+#                in DEVIATIONS.md §2 and change this tag to `placeholder`.
+#
+# Changing a `locked` value needs a DEVIATIONS.md §1 entry. Finalizing a `placeholder` is logged in §3.
+
+meta:
+  source_document: "PREREGISTRATION.md"
+  document_version: "v0.6"
+  document_date: "2026-09-27"
+  config_seeded: "2026-09-28"
+
+# ---------------------------------------------------------------- repo layout (§18)
+paths:
+  data_dir: {value: "data", prov: locked, ref: "§18"}
+  cache_dir: {value: "cache", prov: locked, ref: "§18"}
+  outputs_dir: {value: "outputs", prov: locked, ref: "§18.1"}
+  results_dir: {value: "results", prov: locked, ref: "§18.1"}
+  figures_dir: {value: "results/figures", prov: locked, ref: "§18"}
+  pilot_results_dir: {value: "results/pilot", prov: locked, ref: "§18.1"}
+  logs_dir: {value: "logs", prov: locked, ref: "§18"}
+  gate_file: {value: "outputs/gate.json", prov: locked, ref: "§18.1"}
+  summary_file: {value: "results/summary.json", prov: locked, ref: "§18.2"}
+  equations_file: {value: "results/equations.tex", prov: locked, ref: "§18.2"}
+  split_file_pattern: {value: "outputs/split_{seed}.json", prov: locked, ref: "§11.1"}
+  phase_flag_pattern: {value: "outputs/phase{n}.done", prov: locked, ref: "§18.1"}
+
+# ---------------------------------------------------------------- dataset (§4.1)
+dataset:
+  openneuro_id: {value: "ds003775", prov: locked, ref: "§4.1"}
+  version: {value: "1.2.1", prov: locked, ref: "§4.1"}
+  doi: {value: "10.18112/openneuro.ds003775.v1.2.1", prov: locked, ref: "§4.1"}
+  n_subjects: {value: 111, prov: locked, ref: "§4.1"}
+  n_subjects_with_t2: {value: 42, prov: locked, ref: "§4.1"}
+  n_recordings: {value: 153, prov: locked, ref: "§4.1"}
+  native_fs_hz: {value: 1024, prov: locked, ref: "§4.1"}
+  recording_length_s: {value: 240, prov: locked, ref: "§4.1", note: "4 minutes, eyes closed"}
+  line_freq_hz: {value: 50, prov: locked, ref: "§4.1"}
+  read_units: {value: "uV", prov: locked, ref: "§4.2", note: "always units='uV' when reading EDF (mne-bids issue #1044)"}
+  sub010_special_case: {value: "keep EEG, skip only scans.tsv", prov: locked, ref: "§4.2"}
+
+# ---------------------------------------------------------------- preprocessing (§4.2, §5.1)
+preprocessing:
+  units_check:
+    highpass_hz: {value: 0.5, prov: locked, ref: "§4.2"}
+    median_sd_min_uv: {value: 2, prov: locked, ref: "§4.2"}
+    median_sd_max_uv: {value: 200, prov: locked, ref: "§4.2"}
+    halt_if_fail_fraction_above: {value: 0.05, prov: locked, ref: "§4.2"}
+  channels:
+    left_pair: {value: [P3, PO3], prov: locked, ref: "§6", note: "verify labels against channels.tsv before use"}
+    right_pair: {value: [P4, PO4], prov: locked, ref: "§6"}
+  bad_channel:
+    rms_min_uv: {value: 5, prov: locked, ref: "§5.1", note: "doc writes ~5 and gives no status tag; treated as locked until told otherwise"}
+    rms_max_uv: {value: 150, prov: locked, ref: "§5.1", note: "doc writes ~150 and gives no status tag; treated as locked until told otherwise"}
+    flatline_threshold: {value: null, prov: unset, ref: "§5.1", note: "doc names flat-line detection but gives no threshold"}
+    saturation_threshold: {value: null, prov: unset, ref: "§5.1", note: "doc names saturation detection but gives no threshold"}
+  line_noise:
+    method: {value: "standard notch filter", prov: locked, ref: "§5.1"}
+    freq_hz: {value: 50, prov: locked, ref: "§5.1"}
+    include_harmonics: {value: true, prov: locked, ref: "§5.1"}
+    notch_width: {value: null, prov: unset, ref: "§5.1", note: "doc gives no notch width or Q"}
+  bandpass:
+    highpass_hz: {value: 0.5, prov: placeholder, ref: "§5.1"}
+    lowpass_hz: {value: 45, prov: locked, ref: "§5.1", note: "no separate tag in the doc; treated as locked"}
+    zero_phase: {value: true, prov: locked, ref: "§5.1", note: "no causal IIR filters"}
+    filter_family: {value: null, prov: unset, ref: "§5.1", note: "doc allows forward-backward or linear-phase FIR; pick one and log it"}
+  ocular:
+    method: {value: "wavelet", prov: placeholder, ref: "§5.1", note: "pilot may compare EMD"}
+    detect_band_hz: {value: [0.5, 5.0], prov: placeholder, ref: "§5.1"}
+    detect_threshold_robust_sd: {value: 6, prov: placeholder, ref: "§5.1", note: "MAD-based"}
+    correct_window_s: {value: 0.25, prov: placeholder, ref: "§5.1", note: "+/- around each detected blink"}
+  rejection:
+    segment_length_s: {value: 1.0, prov: locked, ref: "§5.1"}
+    emg_band_hz: {value: [70, 110], prov: locked, ref: "§5.1", note: "power computed BEFORE the low-pass"}
+    emg_multiple_of_median: {value: 5, prov: placeholder, ref: "§5.1"}
+    pad_s: {value: 0.5, prov: locked, ref: "§5.1", note: "each side of every rejected event; no separate tag in the doc"}
+    min_clean_stretch_s: {value: 5, prov: placeholder, ref: "§5.1"}
+    forbidden_tests: {value: [normality, kurtosis, lilliefors], prov: locked, ref: "§5.1"}
+  min_clean_data_per_recording_s: {value: 60, prov: placeholder, ref: "§12"}
+  strict_variant:
+    emg_multiple_of_median: {value: 3, prov: locked, ref: "§5.2"}
+    rms_max_uv: {value: 100, prov: locked, ref: "§5.2"}
+  sensitivity_highpass_hz: {value: 0.1, prov: locked, ref: "§5.1, §5.2"}
+  vigilance:
+    alpha_band_hz: {value: [8, 13], prov: locked, ref: "§5.1"}
+    theta_band_hz: {value: [4, 8], prov: locked, ref: "§5.1"}
+    epoch_s: {value: 2, prov: locked, ref: "§5.1"}
+  observation_fs_hz: {value: 256, prov: locked, ref: "§5.1, §10.1"}
+  noise_adaptive_R: {value: false, prov: locked, ref: "§5.2", note: "hard rejection is the default; §21.2 #1 (open) compares the alternative in the pilot"}
+
+# ---------------------------------------------------------------- rescaling reference (§5.1, §7.6)
+rescaling:
+  mu_ref: {value: null, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "mean of the UNFILTERED simulated y1-y2; written by PLAN.md step A4"}
+  sigma_ref: {value: null, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "SD of the output after the 0.5-45 Hz band-pass and 256 Hz downsampling; written by step A4"}
+  reference_simulation:
+    p_s_inv: {value: 220, prov: locked, ref: "§5.1"}
+    input_noise_uniform_low_s_inv: {value: 120, prov: literature, ref: "§5.1, §7.3"}
+    input_noise_uniform_high_s_inv: {value: 320, prov: literature, ref: "§5.1, §7.3"}
+    duration_s: {value: 600, prov: locked, ref: "§5.1"}
+    sim_fs_hz: {value: 2048, prov: locked, ref: "§5.1"}
+    parameters: {value: "standard §7.3 parameters", prov: locked, ref: "§5.1"}
+    seed: {value: null, prov: unset, ref: "§5.1", note: "doc gives no seed"}
+    burn_in_s: {value: null, prov: unset, ref: "§5.1", note: "doc gives no burn-in for this simulation"}
+    node_structure: {value: null, prov: unset, ref: "§5.1", note: "single node, or two-node at g=0? doc does not say"}
+    integrator: {value: null, prov: unset, ref: "§5.1, §7.6, §9.1", note: "§7.6 says Heun, §9.1 says Euler-Maruyama or stochastic Heun"}
+    noise_redraw_interval: {value: null, prov: unset, ref: "§5.1", note: "per integration step, or held longer? doc does not say"}
+
+# ---------------------------------------------------------------- Jansen-Rit constants (§7.3)
+jansen_rit:
+  A: {value: 3.25, prov: literature, ref: "§7.3", unit: "mV"}
+  B: {value: 22.0, prov: literature, ref: "§7.3", unit: "mV"}
+  a: {value: 100.0, prov: literature, ref: "§7.3", unit: "1/s"}
+  b: {value: 50.0, prov: literature, ref: "§7.3", unit: "1/s"}
+  C: {value: 135.0, prov: literature, ref: "§7.3"}
+  C1_multiplier: {value: 1.0, prov: literature, ref: "§7.3", note: "C1 = C"}
+  C2_multiplier: {value: 0.8, prov: literature, ref: "§7.3", note: "C2 = 0.8*C = 108"}
+  C3_multiplier: {value: 0.25, prov: literature, ref: "§7.3", note: "C3 = 0.25*C"}
+  C4_multiplier: {value: 0.25, prov: literature, ref: "§7.3", note: "C4 = 0.25*C"}
+  e0: {value: 2.5, prov: literature, ref: "§7.3", unit: "1/s", note: "max firing rate is 2*e0 = 5 1/s"}
+  v0: {value: 6.0, prov: literature, ref: "§7.3", unit: "mV"}
+  r: {value: 0.56, prov: literature, ref: "§7.3", unit: "1/mV"}
+  p_mean: {value: 220.0, prov: literature, ref: "§7.3", unit: "1/s", note: "starting value of the ESTIMATED mean input"}
+  sigmoid_offset_subtracted: {value: false, prov: locked, ref: "§7.3", note: "S(v) = 2*e0/(1+exp(r*(v0-v))), so S(0) is not 0"}
+  observation_output: {value: "y1 - y2", prov: locked, ref: "§7.1"}
+  observation_gain: {value: 1.0, prov: locked, ref: "§7.2, §7.4", note: "fixed, not estimated"}
+
+# ---------------------------------------------------------------- coupling and delay (§7.3, §8.1)
+coupling:
+  delay_ms_nominal: {value: 10.0, prov: placeholder, ref: "§7.3", note: "inter-node delay, both directions, fixed"}
+  delay_substeps: {value: 10, prov: placeholder, ref: "§7.5, §7.6", note: "at 1024 Hz effective step this is about 9.77 ms"}
+  gain_prior_mean: {value: 0.0, prov: placeholder, ref: "§7.3, §7.6", unit: "1/s"}
+  gain_prior_sd_factor_of_C2: {value: 0.1, prov: placeholder, ref: "§7.3, §7.6", note: "SD = 0.1*C2 = 10.8 1/s"}
+  common_input_term_in_fitted_model: {value: false, prov: locked, ref: "§7.2"}
+  base_form: {value: "sigmoid of delayed pyramidal output, times gain, added inside the p bracket of y4", prov: locked, ref: "§8.1"}
+
+# ---------------------------------------------------------------- observation model and estimated quantities (§7.2, §7.4)
+observation:
+  mixing_diagonal: {value: 1.0, prov: locked, ref: "§7.2"}
+  mixing_symmetric: {value: true, prov: locked, ref: "§7.2"}
+
+state:
+  n_neural_states: {value: 12, prov: locked, ref: "§7.1, §7.4"}
+  estimated_parameters: {value: [p1, p2, rho1, rho2, g12, g21, m], prov: locked, ref: "§7.4"}
+  n_augmented_states: {value: 19, prov: locked, ref: "§7.4"}
+  n_augmented_states_M1: {value: 17, prov: locked, ref: "§7.6", note: "M1 removes g12 and g21"}
+  reduction_order: {value: [fix_EI_terms, tie_p1_p2, tie_g12_g21], prov: locked, ref: "§7.4", note: "gains and m are never dropped"}
+  never_drop: {value: [g12, g21, m], prov: locked, ref: "§7.4"}
+  reduction_switches:
+    fix_EI_terms: {value: false, prov: locked, ref: "§7.4"}
+    tie_p1_p2: {value: false, prov: locked, ref: "§7.4"}
+    tie_g12_g21: {value: false, prov: locked, ref: "§7.4"}
+
+# ---------------------------------------------------------------- priors (§7.6)
+priors:
+  p_mean: {value: 220.0, prov: placeholder, ref: "§7.6", unit: "1/s"}
+  p_sd: {value: 50.0, prov: placeholder, ref: "§7.6", unit: "1/s"}
+  log_rho_sd: {value: 0.2, prov: placeholder, ref: "§7.6", note: "log rho ~ N(log(A0/B0), 0.2^2), rho = A/B"}
+  AB_product: {value: 71.5, prov: placeholder, ref: "§7.6", note: "A*B held at 3.25 * 22; A = sqrt(AB*rho), B = sqrt(AB/rho)"}
+  m_mean: {value: 0.2, prov: placeholder, ref: "§7.6"}
+  m_sd: {value: 0.15, prov: placeholder, ref: "§7.6"}
+  m_truncate: {value: [0.0, 0.5], prov: placeholder, ref: "§7.6"}
+
+# ---------------------------------------------------------------- filter and integrator (§7.5, §7.6)
+ukf:
+  sigma_points:
+    alpha: {value: 1.0, prov: placeholder, ref: "§7.6"}
+    beta: {value: 2.0, prov: placeholder, ref: "§7.6"}
+    kappa: {value: 0.0, prov: placeholder, ref: "§7.6", note: "at n=19 the mean weights are 0 (centre) and 1/38; no negative weights"}
+  integrator: {value: "heun", prov: placeholder, ref: "§7.6"}
+  substeps_per_observation: {value: 4, prov: placeholder, ref: "§7.6, §10.1", note: "pilot compares 1, 2, 4"}
+  substeps_pilot_compare: {value: [1, 2, 4], prov: locked, ref: "§10.1"}
+  process_noise_added: {value: "once per observation step", prov: placeholder, ref: "§7.6"}
+  observation_noise:
+    R_fraction_of_rescaled_variance: {value: 0.25, prov: placeholder, ref: "§7.6", note: "R = 0.25*sigma_ref^2 * I2"}
+  process_noise:
+    q_grid_low: {value: 1.0e-4, prov: placeholder, ref: "§7.6"}
+    q_grid_high: {value: 1.0e-1, prov: placeholder, ref: "§7.6"}
+    q_grid_n: {value: 8, prov: placeholder, ref: "§7.6", note: "log-spaced"}
+    parameter_random_walk_factor: {value: 1.0e-3, prov: placeholder, ref: "§7.6", note: "variance per second = factor * prior variance"}
+  qr_rule:
+    statistic: {value: "NIS closest to observation dimension", prov: locked, ref: "§7.5"}
+    nis_target: {value: 2, prov: locked, ref: "§7.5"}
+    n_tuning_subjects: {value: 20, prov: placeholder, ref: "§7.6", note: "random training subjects, per split seed"}
+    g0_tuning_series: {value: 20, prov: locked, ref: "§7.5, §9.4"}
+  initial_state:
+    method: {value: "deterministic steady state at prior parameter means", prov: placeholder, ref: "§7.6"}
+    covariance_sim_duration_s: {value: 600, prov: placeholder, ref: "§7.6", note: "per-state variance from a noise-driven simulation at literature parameters"}
+  divergence:
+    covariance_jitter: {value: 1.0e-9, prov: locked, ref: "§7.5"}
+    state_sd_multiple: {value: 10, prov: locked, ref: "§7.5"}
+    recording_fraction: {value: 0.10, prov: locked, ref: "§7.5"}
+  parameter_estimate_from_smoothed_mean_after_burn_in: {value: true, prov: locked, ref: "§7.5"}
+  numba:
+    enabled: {value: null, prov: unset, ref: "§7.5, §21.2 #4", note: "decided by the pilot validation"}
+    rtol: {value: 1.0e-8, prov: placeholder, ref: "§7.5"}
+    atol: {value: 1.0e-10, prov: placeholder, ref: "§7.5"}
+    fastmath: {value: false, prov: locked, ref: "§7.5"}
+    dtype: {value: "float64", prov: locked, ref: "§7.5, §16.5.2"}
+    cholesky_convention: {value: "upper-triangular (SciPy default); rows of U are sigma-point offsets", prov: locked, ref: "§7.5", note: "verify against installed filterpy source"}
+
+# ---------------------------------------------------------------- windows and C4 scoring (§10)
+windows:
+  training_window_s: {value: 2, prov: locked, ref: "§10.2"}
+  training_burn_in_s: {value: 0.5, prov: placeholder, ref: "§10.2"}
+  scoring_windows_s: {value: [2, 5, 10], prov: locked, ref: "§10.2"}
+  pilot_scoring_windows_s: {value: [2, 10], prov: locked, ref: "§17"}
+  c4:
+    n_realizations: {value: 20, prov: locked, ref: "§10.2"}
+    welch_segment_s: {value: 2, prov: locked, ref: "§10.2", note: "non-overlapping, Hann"}
+    grid_resolution_hz: {value: 0.5, prov: locked, ref: "§10.2"}
+    freq_range_hz: {value: [1, 45], prov: locked, ref: "§10.2"}
+    min_stable_fraction: {value: 0.80, prov: locked, ref: "§10.2"}
+    ratio_upper_ci_max: {value: 1.20, prov: placeholder, ref: "§15.1"}
+
+# ---------------------------------------------------------------- residual target (§8.3)
+residual:
+  derivative_primary: {value: "weak_form", prov: locked, ref: "§8.3", note: "final choice made on the pilot synthetic set"}
+  derivative_baseline: {value: "total_variation", prov: locked, ref: "§8.3"}
+  weak_support_ms: {value: 100, prov: placeholder, ref: "§8.3"}
+  weak_support_ms_pilot_compare: {value: [60, 100, 160], prov: placeholder, ref: "§8.3"}
+  tv_weight_grid: {value: null, prov: unset, ref: "§8.3", note: "doc says a fixed 5-value grid but gives no values"}
+  target_state: {value: "y4 (velocity of the excitatory PSP onto pyramidal cells)", prov: locked, ref: "§8.3"}
+  one_shared_equation_both_nodes: {value: true, prov: locked, ref: "§8.4"}
+  pysr_loss: {value: "ordinary mean squared error", prov: locked, ref: "§8.3", note: "no custom weak-form loss"}
+  zscore_with_fit_fold_stats: {value: true, prov: placeholder, ref: "§8.2"}
+
+# ---------------------------------------------------------------- PySR (§8.2, §16.5)
+pysr:
+  version: {value: null, prov: unset, ref: "§8.2", note: "pin the exact version at setup and mirror it in requirements.txt"}
+  binary_operators: {value: ["+", "-", "*", "/"], prov: placeholder, ref: "§8.2"}
+  unary_operators: {value: [tanh, exp], prov: placeholder, ref: "§8.2"}
+  candidate_inputs: {value: "normalized pyramidal potentials of target (t) and source (t-d), S of the source potential at t-d, pairwise products", prov: placeholder, ref: "§8.2"}
+  parsimony_start: {value: 0.01, prov: placeholder, ref: "§8.2"}
+  parsimony_grid: {value: [0.003, 0.01, 0.03], prov: placeholder, ref: "§9.1", note: "lowest median NRMSE on pilot positive series; ties go to the larger"}
+  procs: {value: 8, prov: locked, ref: "§8.2", note: "worker count allowed by the core cap"}
+  populations: {value: "default", prov: locked, ref: "§8.2, §16.5.3"}
+  batching: {value: false, prov: locked, ref: "§8.2, §16.5.3"}
+  timeout_primary_s: {value: 1800, prov: placeholder, ref: "§8.2"}
+  timeout_refit_s: {value: 600, prov: placeholder, ref: "§8.2"}
+  timeout_synthetic_s: {value: 120, prov: placeholder, ref: "§8.2, §9.4"}
+  timeout_pilot_primary_s: {value: 600, prov: locked, ref: "§17"}
+  real_fits_parallel: {value: true, prov: locked, ref: "§8.2"}
+  serial_only_for_pilot_determinism_checks: {value: true, prov: locked, ref: "§8.2"}
+  turbo: {value: false, prov: placeholder, ref: "§8.2, §16.5.2", note: "try True only after the pilot Pareto-front check"}
+  warm_session: {value: true, prov: locked, ref: "§8.2, §16.5.1"}
+  selection:
+    fit_fraction: {value: 0.8, prov: locked, ref: "§8.2"}
+    validation_fraction: {value: 0.2, prov: locked, ref: "§8.2"}
+    loss_tolerance: {value: 0.05, prov: placeholder, ref: "§8.2"}
+    bare_constant_counts_as_no_term: {value: true, prov: locked, ref: "§8.2"}
+    g0_validation: {value: "last 20% of the recording's 2-s windows in time order", prov: locked, ref: "§8.2"}
+    refit_on_full_training_set: {value: false, prov: locked, ref: "§8.2"}
+  subsample:
+    rows_per_fit: {value: 50000, prov: placeholder, ref: "§8.2"}
+    rows_validation: {value: 50000, prov: placeholder, ref: "§8.2"}
+    equal_rows_per_subject: {value: true, prov: locked, ref: "§8.2"}
+    seed: {value: null, prov: unset, ref: "§8.2", note: "doc says fixed recorded seed, gives no value"}
+  ensemble:
+    n_refits: {value: 25, prov: locked, ref: "§8.2"}
+    subject_fraction: {value: 0.5, prov: locked, ref: "§8.2"}
+    refit_inside_bootstrap: {value: false, prov: locked, ref: "§8.2"}
+  signature_rule: {value: "sympy additive components; multiplicative constants set to 1, additive constants inside function arguments set to 0; simplify", prov: locked, ref: "§8.4"}
+
+# ---------------------------------------------------------------- synthetic gate G0 (§5.2, §9)
+g0:
+  generation_fs_hz: {value: 2048, prov: locked, ref: "§9.1"}
+  coupling_levels_x_C2: {value: [0.02, 0.05, 0.10, 0.25], prov: placeholder, ref: "§9.1", note: "about 2.2, 5.4, 10.8, 27 1/s with C2 = 108"}
+  weakest_level_required_to_pass: {value: false, prov: locked, ref: "§9.1", note: "reported as the detection floor"}
+  planted_residual_rms_fraction_of_base: {value: 0.5, prov: placeholder, ref: "§9.1", note: "r_res = c * u_src(t-d) * u_tgt(t)"}
+  regime_grid_shape: {value: [12, 8, 5], prov: placeholder, ref: "§9.1", note: "over (p, input-noise SD, observation-noise level)"}
+  regime_match_features: {value: [alpha_peak_freq, relative_alpha_power, aperiodic_slope], prov: locked, ref: "§9.1", note: "scale-free only; from training subjects only"}
+  mixing_m_range: {value: [0.1, 0.4], prov: locked, ref: "§9.1", note: "uniform per series, all arms"}
+  delay_ms: {value: 10.0, prov: placeholder, ref: "§9.1"}
+  series_per_level: {value: 15, prov: locked, ref: "§9.4"}
+  n_positive_full: {value: 60, prov: locked, ref: "§9.4"}
+  n_null_A_full: {value: 60, prov: placeholder, ref: "§9.4, §15.1"}
+  n_null_B_full: {value: 60, prov: placeholder, ref: "§9.4, §15.1"}
+  n_pilot_positive: {value: 20, prov: locked, ref: "§9.4"}
+  n_pilot_null_A: {value: 20, prov: locked, ref: "§9.4"}
+  n_pilot_null_B: {value: 20, prov: locked, ref: "§9.4"}
+  n_preprocessing_gate_positive: {value: 20, prov: locked, ref: "§9.4"}
+  n_preprocessing_gate_null: {value: 20, prov: locked, ref: "§9.4", note: "artifact-only null"}
+  seeds: {value: null, prov: unset, ref: "§9.4", note: "doc requires fresh seeds after any fix but gives no seed values"}
+  pass:
+    median_nrmse_max: {value: 0.25, prov: placeholder, ref: "§9.1, §15.1"}
+    median_gain_rel_error_max: {value: 0.15, prov: placeholder, ref: "§9.1, §15.1"}
+    from_level: {value: "second-weakest and up", prov: locked, ref: "§9.1"}
+    null_false_positives_allowed: {value: 0, prov: locked, ref: "§9.4"}
+    null_delta_fraction_of_weakest_level: {value: 0.5, prov: placeholder, ref: "§9.2", note: "delta about 1.08 1/s; pilot may raise it, never above the weakest level"}
+    contraction_min: {value: 0.5, prov: placeholder, ref: "§9.3", note: "median over a level's series, all levels except the weakest"}
+  null_B:
+    common_input_lag_ms: {value: [0, 20], prov: locked, ref: "§9.2", note: "random per series"}
+    common_input_variance_share: {value: [0.30, 0.50], prov: placeholder, ref: "§9.2"}
+  null_gain_estimator: {value: "mean of the forward-filtered gain trajectory over the post-burn-in recording", prov: locked, ref: "§9.2"}
+  gate_failure_rule:
+    null_or_stability_failure: {value: "hard stop", prov: locked, ref: "§9.2, §9.3, §18.1"}
+    positive_or_contraction_failure: {value: "continue with low_confidence flag", prov: locked, ref: "§9.1, §18.1"}
+    pilot_mode_never_stops: {value: true, prov: locked, ref: "§17, §18.1"}
+  units_scale_to: {value: "training subjects' median real bipolar SD (uV)", prov: locked, ref: "§9.1"}
+  preprocessing_gate:
+    bias_tolerance: {value: 0.15, prov: placeholder, ref: "§5.2", note: "coupling gains and E/I terms; p excluded"}
+    blink: {value: {duration_s: 0.3, amplitude_uv: 30, rate_per_s: 0.0667}, prov: placeholder, ref: "§5.2", note: "about 1 per 15 s"}
+    emg: {value: {band_hz: [20, 150], duration_s: [1, 3], rms_fraction_of_channel_sd: 0.30, rate_per_min: 3}, prov: placeholder, ref: "§5.2"}
+    drift: {value: {freq_hz: 0.05, amplitude_uv: 50}, prov: placeholder, ref: "§5.2"}
+    sensitivity_subjects: {value: 20, prov: locked, ref: "§5.2"}
+    sensitivity_variants: {value: 4, prov: locked, ref: "§5.2", note: "high-pass 0.5 vs 0.1 Hz, crossed with default vs strict rejection"}
+
+# ---------------------------------------------------------------- split, subjects, seeds (§11, §17)
+split:
+  primary_seed: {value: 42, prov: locked, ref: "§11.1"}
+  extra_seeds: {value: null, prov: unset, ref: "§11.2", note: "4 more seeds are needed, values not given"}
+  n_split_seeds_total: {value: 5, prov: locked, ref: "§11.2"}
+  train_fraction: {value: 0.70, prov: locked, ref: "§11.1"}
+  n_train: {value: 78, prov: locked, ref: "§11.1"}
+  n_test: {value: 33, prov: locked, ref: "§11.1"}
+  split_before_exclusions: {value: true, prov: locked, ref: "§11.1"}
+  t2_follows_t1: {value: true, prov: locked, ref: "§11.1"}
+  primary_analysis_sessions: {value: "t1 only", prov: locked, ref: "§11.1"}
+  n_pilot_subjects: {value: 12, prov: locked, ref: "§17"}
+  n_pilot_subjects_with_t2: {value: 4, prov: locked, ref: "§17"}
+  pilot_internal_split: {value: [8, 4], prov: locked, ref: "§17"}
+  pilot_subjects_training_side_only: {value: true, prov: locked, ref: "§11.1, §17"}
+
+# ---------------------------------------------------------------- baseline (§13)
+baseline:
+  var_order_range: {value: [1, 32], prov: locked, ref: "§13.1", note: "samples"}
+  var_cv_folds: {value: 5, prov: locked, ref: "§13.1", note: "subject-wise, on training subjects"}
+  M0_coefficients_pooled_and_frozen: {value: true, prov: locked, ref: "§13.1"}
+  M0b_refit_per_test_recording: {value: true, prov: locked, ref: "§13.1", note: "secondary"}
+  score_on_identical_samples: {value: true, prov: locked, ref: "§10.2"}
+
+# ---------------------------------------------------------------- statistics and diagnostics (§11, §14, §15)
+statistics:
+  bootstrap_B: {value: 10000, prov: placeholder, ref: "§14", note: "percentile; pre-drawn index matrix"}
+  bootstrap_B_pilot: {value: 100, prov: locked, ref: "§17"}
+  bootstrap_unit: {value: "subject (cluster bootstrap when t1 and t2 appear together)", prov: locked, ref: "§11.4"}
+  ci_level: {value: 0.95, prov: locked, ref: "§15.1"}
+  icc_form: {value: "ICC(3,1) consistency", prov: locked, ref: "§11.3"}
+  icc_ci_method: {value: "F-based", prov: placeholder, ref: "§14"}
+  holm_family_size: {value: 4, prov: placeholder, ref: "§14, §15.2"}
+  wpli_bands_hz: {value: [[8, 13], [1, 45]], prov: placeholder, ref: "§14"}
+  aaft:
+    n_recordings: {value: 10, prov: locked, ref: "§14"}
+    n_surrogates: {value: 50, prov: locked, ref: "§14"}
+    seed: {value: null, prov: unset, ref: "§14", note: "doc says fixed seed, gives no value"}
+    p_threshold: {value: 0.05, prov: locked, ref: "§14"}
+  criteria:
+    c2_signature_recurrence_min: {value: 0.70, prov: placeholder, ref: "§15.1"}
+    c2_min_seeds_passing_c1: {value: 4, prov: locked, ref: "§15.1", note: "of 5"}
+    c3_icc_ci_lower_min: {value: 0.40, prov: placeholder, ref: "§15.1", note: "in at least one direction; compute the matching observed ICC before the pilot"}
+    c4_ratio_upper_ci_max: {value: 1.20, prov: placeholder, ref: "§15.1"}
+
+# ---------------------------------------------------------------- compute (§16)
+compute:
+  os: {value: "windows", prov: locked, ref: "§21.2 #2", note: "decided 2026-09-28: Windows, VS Code, PowerShell"}
+  logical_cpus: {value: 8, prov: locked, ref: "§16.1", note: "4 cores / 8 threads"}
+  affinity_mask_hex: {value: "FF", prov: placeholder, ref: "§16.2", note: "logical CPUs 0-7; SMT sibling pairing still to be verified on this machine"}
+  julia_threads: {value: 8, prov: locked, ref: "§16.2"}
+  blas_threads_per_worker: {value: 1, prov: locked, ref: "§16.2, §16.5.1"}
+  joblib_backend: {value: "loky", prov: locked, ref: "§16.5.1"}
+  joblib_n_jobs: {value: 4, prov: placeholder, ref: "§16.5.1, §21.2 #3", note: "pilot benchmarks 4 vs 6 vs 8"}
+  pool_size_from: {value: "psutil.Process().cpu_affinity()", prov: locked, ref: "§16.2", note: "never os.cpu_count()"}
+  pysr_never_concurrent_with_pool: {value: true, prov: locked, ref: "§16.5.1"}
+  env_vars_before_numpy_import:
+    OMP_NUM_THREADS: {value: "1", prov: locked, ref: "§16.2"}
+    OPENBLAS_NUM_THREADS: {value: "1", prov: locked, ref: "§16.2"}
+    MKL_NUM_THREADS: {value: "1", prov: locked, ref: "§16.2"}
+    PYTHON_JULIACALL_THREADS: {value: "8", prov: locked, ref: "§16.2"}
+
+# ---------------------------------------------------------------- items the document leaves open
+# Not read by code. Claude Code must ask before implementing any of these (see prov: unset above),
+# then log the answer in DEVIATIONS.md §2 (IMP-nnn) and change the tag to `placeholder`.
+open_questions_for_implementation:
+  - "rescaling.reference_simulation: seed, burn-in, single node vs two-node at g=0, integrator, noise redraw interval (PLAN.md A4)"
+  - "split.extra_seeds: the 4 additional split seeds (PLAN.md B2)"
+  - "preprocessing.bad_channel: flat-line and saturation thresholds"
+  - "preprocessing.line_noise.notch_width and preprocessing.bandpass.filter_family"
+  - "residual.tv_weight_grid: the 5 values"
+  - "pysr.subsample.seed, g0.seeds, aaft.seed: seed values"
+  - "pysr.version: exact version to pin at setup"
+  - "ukf.numba.enabled: decided by the pilot validation (§21.2 #4)"

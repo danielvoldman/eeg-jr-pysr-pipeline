@@ -1,0 +1,24 @@
+# .gitignore
+# Source: PREREGISTRATION.md §18.3 (planning document v0.6).
+# Everything under "(created at run time)" in the §18 tree is generated, not committed.
+# Tracked on purpose: config.yml, PREREGISTRATION.md, DEVIATIONS.md, CLAUDE.md, PLAN.md.
+
+data/
+cache/
+outputs/
+results/
+logs/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.julia_env/
+*.jl.cov
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Added beyond §18.3 (not in the planning document): pytest cache. tests/ itself is tracked.
+.pytest_cache/
