@@ -59,7 +59,7 @@ Done when tests show:
 
 Note (2026-09-28): done; src/preprocess.py (bandpass, bandpass_sos, bandpass_impulse_response, downsample), tests/test_preprocess.py. Butterworth SOS via sosfiltfilt, order 4 per pass, so the nominal 0.5 and 45 Hz cutoffs are the -6 dB points; FFT downsampling with a 2 s odd reflect-pad (IMP-004). bandpass() is for whole continuous recordings before segmentation, never for short segments; inputs of padlen samples or fewer raise by design. Trimming or masking the filtered edges is decided in B4 using the printed edge-transient numbers; nothing is trimmed in A3. The impulse response is returned by a function only; saving it is deferred to phase 1 (see the B4 bullet). Note (2026-09-28, after review of a0be7be): the impulse-response "Done when" item was clarified to say the function returns the response and saving and documenting it is done in B4.
 
-### [ ] A4. Reference constants μ_ref and σ_ref
+### [x] A4. Reference constants μ_ref and σ_ref
 Read: §5.1 (rescaling paragraph), §7.3, §7.6 ("Rescaling constants" row).
 Files: `src/model.py` (`compute_reference_constants`), which may import A3's functions from `preprocess.py`; `config.yml`.
 **Open questions. Ask me before implementing:**
@@ -75,6 +75,8 @@ Done when:
 - Rerunning with the same seed reproduces identical values.
 - A test confirms that `preprocess.py` does not import `model.py`.
 - I get a short written summary of the numbers.
+
+Note (2026-09-28): done; mu_ref = 7.572449764282774, sigma_ref = 1.131413384422008, seed 42, computed at commit 7191d10 (mV, single node, 600 s kept after 10 s burn-in, 5 s trim per end, ddof 1). src/model.py, tests/test_reference_constants.py (111 tests pass). Seed spread across 42-47: 0.03% for mu_ref, 2.8% for sigma_ref (IMP-005). B5's per-recording rescaling must use the same SD convention (ddof 1).
 
 ---
 

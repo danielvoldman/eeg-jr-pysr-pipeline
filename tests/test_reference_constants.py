@@ -291,3 +291,20 @@ def test_new_config_leaves_are_placeholders():
 def test_real_config_untouched_by_this_module():
     # runs last in this file; the hash was taken at import
     assert hashlib.sha256(DEFAULT_CONFIG_PATH.read_bytes()).hexdigest() == REAL_CONFIG_SHA
+
+
+def test_stored_reference_constants_match_code():
+    """Guard: the constants stored in config.yml are what the code produces at seed 42."""
+    cfg = load_config()
+    rs = cfg["rescaling"]
+    for key in ("mu_ref", "sigma_ref"):
+        assert type(rs[key]) is float and math.isfinite(rs[key]), key
+    result = model.compute_reference_constants(cfg, seed=42)
+    np.testing.assert_allclose(result["mu_ref"], rs["mu_ref"], rtol=1e-9, atol=0.0)
+    np.testing.assert_allclose(result["sigma_ref"], rs["sigma_ref"], rtol=1e-9, atol=0.0)
+    prov = rs["computed_provenance"]
+    assert prov["seed"] == 42
+    assert prov["kept_duration_s"] == 600
+    assert prov["burn_in_s"] == 10
+    assert prov["ddof"] == 1
+    assert prov["edge_trim_s"] == 5

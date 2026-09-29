@@ -110,9 +110,9 @@ preprocessing:
 
 # ---------------------------------------------------------------- rescaling reference (§5.1, §7.6)
 rescaling:
-  mu_ref: {value: null, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "mean of the UNFILTERED simulated y1-y2; written by PLAN.md step A4"}
-  sigma_ref: {value: null, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "SD of the output after the 0.5-45 Hz band-pass and 256 Hz downsampling; written by step A4"}
-  computed_provenance: {value: null, prov: computed, ref: "§5.1", note: "IMP-005; seed, kept duration, burn-in, rates, trim, ddof, git hash and dirty flag, library versions, units; written together with mu_ref and sigma_ref"}
+  mu_ref: {value: 7.572449764282774, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "mean of the UNFILTERED simulated y1-y2; written by PLAN.md step A4"}
+  sigma_ref: {value: 1.131413384422008, prov: computed, ref: "§5.1", unit: "model output units (mV)", note: "SD of the output after the 0.5-45 Hz band-pass and 256 Hz downsampling; written by step A4"}
+  computed_provenance: {value: {"seed": 42, "kept_duration_s": 600, "burn_in_s": 10, "sim_fs_hz": 2048, "observation_fs_hz": 256, "edge_trim_s": 5, "ddof": 1, "n_mu_samples": 1228800, "n_sigma_samples": 151040, "units": "mV (model output units)", "git_commit": "7191d1007dd841e77f44a4932ea3d06c5acf346f", "git_dirty": false, "numpy": "2.5.3", "scipy": "1.18.1", "numba": "0.67.0"}, prov: computed, ref: "§5.1", note: "IMP-005; seed, kept duration, burn-in, rates, trim, ddof, git hash and dirty flag, library versions, units; written together with mu_ref and sigma_ref"}
   reference_simulation:
     p_s_inv: {value: 220, prov: locked, ref: "§5.1"}
     input_noise_uniform_low_s_inv: {value: 120, prov: literature, ref: "§5.1, §7.3"}
