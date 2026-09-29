@@ -55,9 +55,9 @@ Done when tests show:
 - The filter is zero-phase: a 10 Hz sine shows no lag.
 - Passband gain is about 1 at 10 Hz, and there is clear attenuation at 0.1 Hz and 60 Hz.
 - The anti-alias and downsample path works from both 1,024 Hz and 2,048 Hz to 256 Hz.
-- The impulse response is saved and documented (the §5.1 disclosure).
+- bandpass_impulse_response returns the response; saving and documenting it is done in B4.
 
-Note (2026-09-28): done; src/preprocess.py (bandpass, bandpass_sos, bandpass_impulse_response, downsample), tests/test_preprocess.py. Butterworth SOS via sosfiltfilt, order 4 per pass, so the nominal 0.5 and 45 Hz cutoffs are the -6 dB points; FFT downsampling with a 2 s odd reflect-pad (IMP-004). bandpass() is for whole continuous recordings before segmentation, never for short segments; inputs of padlen samples or fewer raise by design. Trimming or masking the filtered edges is decided in B4 using the printed edge-transient numbers; nothing is trimmed in A3. The impulse response is returned by a function only; saving it is deferred to phase 1 (see the B4 bullet).
+Note (2026-09-28): done; src/preprocess.py (bandpass, bandpass_sos, bandpass_impulse_response, downsample), tests/test_preprocess.py. Butterworth SOS via sosfiltfilt, order 4 per pass, so the nominal 0.5 and 45 Hz cutoffs are the -6 dB points; FFT downsampling with a 2 s odd reflect-pad (IMP-004). bandpass() is for whole continuous recordings before segmentation, never for short segments; inputs of padlen samples or fewer raise by design. Trimming or masking the filtered edges is decided in B4 using the printed edge-transient numbers; nothing is trimmed in A3. The impulse response is returned by a function only; saving it is deferred to phase 1 (see the B4 bullet). Note (2026-09-28, after review of a0be7be): the impulse-response "Done when" item was clarified to say the function returns the response and saving and documenting it is done in B4.
 
 ### [ ] A4. Reference constants μ_ref and σ_ref
 Read: §5.1 (rescaling paragraph), §7.3, §7.6 ("Rescaling constants" row).

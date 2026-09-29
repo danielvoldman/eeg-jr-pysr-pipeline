@@ -25,7 +25,7 @@ FS_NATIVE = CFG["dataset"]["native_fs_hz"]
 FS_GEN = CFG["g0"]["generation_fs_hz"]
 FS_OBS = CFG["preprocessing"]["observation_fs_hz"]
 DURATION_S = CFG["dataset"]["recording_length_s"]
-SEED = CFG["split"]["primary_seed"]
+TEST_NOISE_SEED = 20260928   # test-local noise seed; not a pipeline seed
 HP_VARIANTS = (HP_DEFAULT, HP_SENS)
 
 
@@ -84,9 +84,8 @@ def middle(y, fs, seconds=100):
 
 # ---- gain table ---------------------------------------------------------------
 
-@pytest.mark.parametrize("hp", HP_VARIANTS)
-def test_gain_matches_closed_form(hp, capsys):
-    fs = FS_NATIVE
+@pytest.mark.parametrize("hp,fs", [(hp, FS_NATIVE) for hp in HP_VARIANTS] + [(HP_DEFAULT, FS_GEN)])
+def test_gain_matches_closed_form(hp, fs, capsys):
     freqs = (0.1, 0.5, 10.0, 45.0, 60.0)
     lines = [f"\n[gain table] fs={fs} Hz, hp={hp} Hz, lp={LP} Hz, order {ORDER}/pass, forward-backward",
              f"{'f (Hz)':>8} {'warped ref':>14} {'analog ref':>14} {'measured':>14} {'|meas-warped|':>14}"]
@@ -184,6 +183,10 @@ def test_impulse_response(hp, capsys):
     assert int(np.argmax(np.abs(h))) == centre
     # symmetric about the centre
     np.testing.assert_allclose(h, h[::-1], rtol=0.0, atol=1e-9 * peak)
+    # asymmetry of the response about its centre, reported (item: source of the imaginary residue)
+    lags = np.arange(1, centre + 1)
+    asym = np.abs(h[centre + lags] - h[centre - lags])
+    k_worst = int(lags[np.argmax(asym)])
     # DC gain about 0 (a high-pass has zero DC gain)
     dc = float(h.sum())
     # response at both ends of the configured window is negligible (STOP-and-report rule)
@@ -191,13 +194,19 @@ def test_impulse_response(hp, capsys):
     with capsys.disabled():
         print(f"\n[impulse response] hp={hp}: n={n}, peak={peak:.6e}, sum(h)={dc:.3e}, "
               f"|h[0]|/peak={abs(h[0]) / peak:.3e}, |h[-1]|/peak={abs(h[-1]) / peak:.3e}")
+        print(f"[impulse asymmetry] hp={hp}: max |h[c+k]-h[c-k]|={asym.max():.3e} "
+              f"({asym.max() / peak:.3e} of peak) at k={k_worst} samples ({k_worst / fs:.3f} s from centre)")
     assert end_ratio < 1e-6
     assert abs(dc) < 1e-6
     # frequency response matches the closed form; phase is zero once centred
     spec = np.fft.rfft(np.roll(h, -centre))
-    # the window truncates the 0.1 Hz tail at ~6e-10 of peak, which leaves ~5e-9 imaginary
-    # residue; 1e-7 is a loose bound on "zero phase", not a tuned value
-    assert np.max(np.abs(spec.imag)) < 1e-7 * np.max(np.abs(spec))
+    # Observed imaginary residue: ~1e-11 of the spectral peak at hp=0.5 and ~5e-9 at hp=0.1.
+    # Cause (measured above): the response is symmetric to ~1e-14 of peak near the impulse
+    # (round-off); for hp=0.1 the largest asymmetry (~2e-11 of peak) sits in the slow tail
+    # near the end of the 120 s window (~59 s from centre), where the 0.1 Hz tail (~1e-9 of
+    # peak at the window ends) is cut by the finite window. The sample asymmetries there
+    # share a sign, so they add up to ~5e-9 in the spectrum. Bound = ~3x the observed value.
+    assert np.max(np.abs(spec.imag)) < 1.5e-8 * np.max(np.abs(spec))
     for target in (0.5, 1.0, 5.0, 10.0, 20.0, 45.0, 60.0, 100.0):
         k = int(round(target * n / fs))
         f_k = k * fs / n
@@ -241,7 +250,7 @@ def test_downsample_default_target_is_observation_rate():
 
 
 def test_downsample_2d_matches_1d():
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(TEST_NOISE_SEED)
     x = rng.standard_normal((2, FS_NATIVE * 10))
     y2 = preprocess.downsample(CFG, x, FS_NATIVE)
     for i in range(2):
@@ -264,6 +273,26 @@ def test_downsample_raises():
         bad = x.copy()
         bad[5] = np.nan
         preprocess.downsample(CFG, bad, FS_NATIVE)
+
+
+def test_downsample_not_divisible_raises_2048():
+    with pytest.raises(preprocess.PreprocessError):
+        preprocess.downsample(CFG, np.zeros(FS_GEN * 10 + 1), FS_GEN)   # not divisible by 8
+    with pytest.raises(preprocess.PreprocessError):
+        preprocess.downsample(CFG, np.zeros(FS_GEN * 10 + 4), FS_GEN)   # divisible by 4 but not 8
+
+
+@pytest.mark.parametrize("f", (300.0, 700.0))
+def test_bandpass_downsample_removes_high_frequencies_2048(f, capsys):
+    x = sine(f, FS_GEN, DURATION_S)
+    y = preprocess.downsample(CFG, preprocess.bandpass(CFG, x, FS_GEN), FS_GEN)
+    ym, _ = middle(y, FS_OBS)
+    rms_out = math.sqrt(float(np.mean(ym ** 2)))
+    rms_in = math.sqrt(float(np.mean(x ** 2)))
+    with capsys.disabled():
+        print(f"\n[2048 Hz rejection] {f} Hz sine: interior RMS out/in = {rms_out / rms_in:.3e} "
+              f"(warped closed-form band-pass gain {ref_gain_warped(f, HP_DEFAULT, FS_GEN):.3e})")
+    assert rms_out < 1e-5 * rms_in
 
 
 def test_downsample_ratio_one_returns_copy():
@@ -291,6 +320,13 @@ def test_bandpass_guards():
     with pytest.raises(preprocess.PreprocessError):
         preprocess.bandpass(CFG, x[:padlen], fs)          # padlen samples or fewer raise
     assert np.all(np.isfinite(preprocess.bandpass(CFG, x[:padlen + 1], fs)))
+    # same boundary at 2048 Hz
+    fs2 = FS_GEN
+    padlen2 = int(round(BP["edge_pad_s"] * fs2))
+    x2 = sine(10.0, fs2, DURATION_S)
+    with pytest.raises(preprocess.PreprocessError):
+        preprocess.bandpass(CFG, x2[:padlen2], fs2)
+    assert np.all(np.isfinite(preprocess.bandpass(CFG, x2[:padlen2 + 1], fs2)))
     with pytest.raises(preprocess.PreprocessError):
         preprocess.bandpass(CFG, x, fs, highpass_hz=LP)   # highpass >= lowpass
     with pytest.raises(preprocess.PreprocessError):
@@ -314,7 +350,7 @@ def test_bandpass_config_guards():
 
 
 def test_bandpass_2d_matches_1d_and_time_last():
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(TEST_NOISE_SEED)
     x = rng.standard_normal((2, FS_OBS * 60))
     y2 = preprocess.bandpass(CFG, x, FS_OBS)
     assert y2.shape == x.shape
@@ -332,7 +368,7 @@ def test_bandpass_default_highpass_is_config_value():
 # ---- determinism --------------------------------------------------------------------
 
 def test_bit_identical_repeat():
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(TEST_NOISE_SEED)
     x = rng.standard_normal(FS_NATIVE * 30)
     a = preprocess.downsample(CFG, preprocess.bandpass(CFG, x, FS_NATIVE), FS_NATIVE)
     b = preprocess.downsample(CFG, preprocess.bandpass(CFG, x, FS_NATIVE), FS_NATIVE)
@@ -412,10 +448,12 @@ def test_functions_write_nothing_to_run_time_folders():
                 for p in [d, *d.rglob("*")]}
 
     before = snapshot()
+    absent = [d for d in folders if not d.exists()]
     x = sine(10.0, FS_NATIVE, DURATION_S)
     preprocess.downsample(CFG, preprocess.bandpass(CFG, x, FS_NATIVE), FS_NATIVE)
     preprocess.bandpass_impulse_response(CFG, FS_NATIVE)
     assert snapshot() == before
+    assert not [d for d in absent if d.exists()], "a run-time folder was created"
 
 
 def test_config_leaves_for_imp004_are_placeholders():
