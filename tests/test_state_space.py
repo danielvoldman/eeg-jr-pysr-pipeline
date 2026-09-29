@@ -570,3 +570,65 @@ def test_replace_latest_touches_only_the_newest_entry():
         assert np.array_equal(buf.read(lag), before[lag]), lag
     assert np.array_equal(buf.read(0), [99.0, -99.0]) and not np.array_equal(before[0], buf.read(0))
     assert [buf.read(l)[0] for l in (1, 2, 3, 4)] == [3, 2, 1, 1.0]   # predicted entries 3, 2, 1, then the fill
+
+
+# ---- C2c: coupled deterministic fixed point (IMP-029) -----------------------------------------------------
+
+LR0 = math.log(3.25 / 22)
+FIXED_POINT_CASES = [(220.0, 220.0, LR0, LR0, 12.0, 0.0), (220.0, 260.0, LR0, LR0, 12.0, 0.0),
+                     (180.0, 250.0, LR0 + 0.2, LR0 - 0.3, -8.0, 15.0), (260.0, 240.0, LR0, LR0, 27.0, 27.0),
+                     (250.0, 200.0, LR0 - 0.2, LR0 + 0.2, 5.0, -12.0)]
+
+
+def fsolve_coupled(p1, p2, lr1, lr2, g12, g21):
+    """Independent solution of the six fixed-point conditions with scipy (no state_space code)."""
+    ab = A0 * B0
+    A1, B1 = math.sqrt(ab * math.exp(lr1)), math.sqrt(ab / math.exp(lr1))
+    A2, B2 = math.sqrt(ab * math.exp(lr2)), math.sqrt(ab / math.exp(lr2))
+
+    def eqs(u):
+        n1, n2 = u[:3], u[3:]
+        s1, s2 = S(n1[1] - n1[2]), S(n2[1] - n2[2])
+        out = []
+        for (y0, y1, y2), p, A, B, g_in, s_src in ((n1, p1, A1, B1, g21, s2), (n2, p2, A2, B2, g12, s1)):
+            out += [y0 - (A / a) * S(y1 - y2),
+                    y1 - (A / a) * (p + C2 * S(C1 * y0) + g_in * s_src),
+                    y2 - (B / b) * C4 * S(C3 * y0)]
+        return out
+    sol = fsolve(eqs, [0.1, 20.0, 15.0] * 2, xtol=1e-12)
+    assert np.abs(eqs(sol)).max() < 1e-9          # judge the residual, not the solver's status flag
+    return sol
+
+
+@pytest.mark.parametrize("case", FIXED_POINT_CASES)
+def test_coupled_steady_state_matches_fsolve_and_has_zero_drift(cfg, case):
+    x12 = ss.coupled_steady_state(cfg, *case)
+    sol = fsolve_coupled(*case)
+    np.testing.assert_allclose(x12[[0, 1, 2, 6, 7, 8]], sol, rtol=1e-7, atol=1e-8)
+    assert np.all(x12[[3, 4, 5, 9, 10, 11]] == 0.0)
+    layout = ss.make_layout(cfg)
+    x = ss.prior_mean(layout, cfg)
+    x[:12] = x12
+    x[[ss.P1, ss.P2, ss.LOG_RHO1, ss.LOG_RHO2, ss.G12, ss.G21]] = case
+    s = [S(x12[1] - x12[2]), S(x12[7] - x12[8])]
+    assert np.abs(ss.drift(x, s, layout, cfg)[:12]).max() < 1e-6     # the delay drops out at a fixed point
+
+
+def test_coupled_steady_state_reduces_to_uncoupled_at_zero_gain(cfg):
+    for p1, p2, lr1, lr2 in ((220.0, 220.0, LR0, LR0), (180.0, 260.0, LR0 + 0.15, LR0 - 0.1)):
+        x12 = ss.coupled_steady_state(cfg, p1, p2, lr1, lr2, 0.0, 0.0)
+        ab = A0 * B0
+        n1 = model.steady_state(p1, math.sqrt(ab * math.exp(lr1)), math.sqrt(ab / math.exp(lr1)), cfg)
+        n2 = model.steady_state(p2, math.sqrt(ab * math.exp(lr2)), math.sqrt(ab / math.exp(lr2)), cfg)
+        assert np.array_equal(x12, np.concatenate([n1, n2]))
+    np.testing.assert_allclose(ss.coupled_steady_state(cfg, P0, P0, LR0, LR0, 0.0, 0.0),
+                               ss.initial_neural_state(cfg), rtol=1e-12)
+
+
+def test_coupled_steady_state_failures_are_raised_not_hidden(cfg):
+    with pytest.raises(model.ModelError):                 # bistable parameters: steady_state refuses (3 roots)
+        ss.coupled_steady_state(cfg, 150.0, 150.0, LR0 + 0.2, LR0 - 0.3, 0.0, 0.0)
+    c = copy.deepcopy(cfg)
+    c["ukf"]["divergence"]["fixed_point_max_iterations"] = 0
+    with pytest.raises(ss.StateSpaceError, match="converge"):
+        ss.coupled_steady_state(c, 220.0, 260.0, LR0, LR0, 12.0, 0.0)

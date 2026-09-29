@@ -279,6 +279,11 @@ ukf:
     covariance_jitter: {value: 1.0e-9, prov: locked, ref: "§7.5"}
     state_sd_multiple: {value: 10, prov: locked, ref: "§7.5"}
     recording_fraction: {value: 0.10, prov: locked, ref: "§7.5"}
+    startup_exempt_s: {value: 0.5, prov: placeholder, ref: "§7.5, §10.2, DEV-003", note: "the state-beyond-10-SD flag (only that flag) is suppressed for this long after each (re)initialization; NaN/Inf, covariance-not-PD and linalg checks stay active from step 1; matches the 0.5 s burn-in of §10.2"}
+    reference_refresh_fraction_of_prior_sd: {value: 0.05, prov: placeholder, ref: "§7.5, IMP-029", note: "the divergence reference (deterministic fixed point at the current posterior-mean parameters) is recomputed when any parameter mean has moved more than this fraction of its prior SD from the cached parameters"}
+    fixed_point_tolerance: {value: 1.0e-10, prov: placeholder, ref: "§7.5, IMP-029", note: "max |S - F(S)| of the coupled fixed-point solve"}
+    fixed_point_max_iterations: {value: 50, prov: placeholder, ref: "§7.5, IMP-029"}
+    fixed_point_fd_step: {value: 1.0e-6, prov: placeholder, ref: "§7.5, IMP-029", note: "finite-difference step for the 2 x 2 Newton Jacobian"}
   parameter_estimate_from_smoothed_mean_after_burn_in: {value: true, prov: locked, ref: "§7.5"}
   numba:
     enabled: {value: null, prov: unset, ref: "§7.5, §21.2 #4", note: "decided by the pilot validation"}

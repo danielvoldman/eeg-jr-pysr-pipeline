@@ -30,9 +30,7 @@ GAIN_MEAN_BOUND = 3.0    # C2b: |mean filtered/smoothed gain| for zero coupling 
 G12_TRUE = 12.0          # C2b coupled test, fixed before the first run: g12 = 12, g21 = 0
 COUPLED_BAND = (0.5, 1.5)   # mean of the filtered (and smoothed) g12 over the last half must lie in 0.5..1.5 x truth
 COUPLED_G21_BOUND = 3.0
-COUPLED_P = (220.0, 235.0)  # asymmetric nodes. First tried (220, 260): with g12 = 12 the true node-2 mean y1 is then
-                            # 10.5 SD from the prior steady state and the §7.5 divergence rule stops the run (step 104);
-                            # (220, 235) gives 7.1 SD. The band and g12 were not changed (IMP-026, PLAN.md C2b).
+COUPLED_P = (220.0, 260.0)  # asymmetric nodes (C2b tried this and the old prior-reference divergence rule stopped it; C2c, IMP-029)
 
 
 # ---- helpers: simulated data with known truth ---------------------------------------------
@@ -655,6 +653,186 @@ def test_every_switch_combination_runs_one_filter_step(fix_ei, tie_p, tie_g, inc
     assert len(lay.names[12:]) == n - 12
     np.testing.assert_allclose(np.diag(Q)[12:], 1.0e-3 * prior_var / cfg["preprocessing"]["observation_fs_hz"],
                                rtol=1e-14)
+
+
+# ---- C2c: divergence reference at the current parameters (IMP-029) --------------------------------------
+
+SD12 = np.sqrt(np.tile(ss.neural_variance(CFG), 2))
+
+
+def shifted_x(layout, p2=None, g12=None):
+    x = ss.prior_mean(layout, CFG)
+    if p2 is not None:
+        x[layout.idx["p2"]] = p2
+    if g12 is not None:
+        x[layout.idx["g12"]] = g12
+    return x
+
+
+@pytest.mark.parametrize("p,g12", [((220.0, 260.0), 0.0), ((220.0, 220.0), 12.0), ((220.0, 260.0), 12.0)])
+def test_healthy_shifted_data_is_not_flagged(layout, p, g12):
+    """p2 = 260 alone, g12 = 12 alone, and both together (the case that stopped the C2b coupled test)."""
+    _, z = simulate_data(8, seed=31, g12=g12, g21=0.0, p=np.array(p))
+    res = ukf.run_filter(z, CFG, layout, Q_TEST)
+    print(f"\np = {p}, g12 = {g12}: n_done {res.n_done} of {len(z)}, monitor {res.monitor}")
+    assert not res.diverged and res.n_done == len(z)
+    assert res.monitor["n_reference_fallbacks"] == 0
+    if p[1] != p[0] or g12 != 0.0:
+        assert res.monitor["n_reference_updates"] >= 1
+
+
+def test_reference_flags_blown_up_state_and_spares_near_current_reference(layout):
+    x = shifted_x(layout, p2=260.0, g12=12.0)
+    ref = ukf.DivergenceReference(layout, CFG)
+    cur = ref.center(x)
+    prior12 = ss.initial_neural_state(CFG)
+    assert (np.abs(cur - prior12) / SD12)[7] > 10.0          # precondition: far from the PRIOR steady state
+    P = np.eye(layout.n)
+
+    def verdict(state12):
+        xx = x.copy()
+        xx[:12] = state12
+        return ukf._first_divergence(xx, P, CFG, ref.center(xx), SD12, 1.0)
+    assert verdict(cur) is None                              # near the current reference: healthy
+    assert verdict(prior12) == "state_beyond_sd_multiple"    # near the prior one, far from the current: flagged
+    for i in (0, 6):                                         # y0 of each node
+        up, down, near = cur.copy(), cur.copy(), cur.copy()
+        up[i] += 10.5 * SD12[i]
+        down[i] -= 10.5 * SD12[i]
+        near[i] += 9.5 * SD12[i]
+        assert verdict(up) == "state_beyond_sd_multiple" and verdict(down) == "state_beyond_sd_multiple"
+        assert verdict(near) is None
+
+
+def test_blown_up_run_is_flagged_after_the_startup_exemption(layout):
+    _, z = simulate_data(2, seed=31)
+    res = ukf.run_filter(z + 100.0, CFG, layout, Q_TEST)         # 100 mV offset: nothing healthy about it
+    assert res.diverged and res.divergence_reason == "state_beyond_sd_multiple"
+    assert res.divergence_step >= STARTUP_STEPS
+
+
+# ---- C2c: start-up exemption (DEV-003) ---------------------------------------------------------------------
+
+STARTUP_STEPS = round(CFG["ukf"]["divergence"]["startup_exempt_s"] * CFG["preprocessing"]["observation_fs_hz"])
+
+
+def shifted_reference(monkeypatch, n_sd=11.0):
+    """A reference 11 SD away from every neural state of a healthy run: 'beyond 10 SD' at every step."""
+    monkeypatch.setattr(ukf.DivergenceReference, "center",
+                        lambda self, x: ss.initial_neural_state(CFG) + n_sd * SD12)
+
+
+def test_startup_exemption_length_is_half_a_second():
+    assert CFG["ukf"]["divergence"]["startup_exempt_s"] == 0.5 and STARTUP_STEPS == 128
+
+
+def test_state_flag_is_suppressed_at_step_2_and_raised_at_step_129(layout, monkeypatch):
+    shifted_reference(monkeypatch)
+    _, z = simulate_data(1, seed=3)
+    short = ukf.run_filter(z[:STARTUP_STEPS], CFG, layout, Q_TEST)      # steps 1..128: all exempt
+    assert not short.diverged and short.n_done == STARTUP_STEPS
+    res = ukf.run_filter(z[:STARTUP_STEPS + 10], CFG, layout, Q_TEST)
+    assert res.diverged and res.divergence_reason == "state_beyond_sd_multiple"
+    assert res.divergence_step == STARTUP_STEPS and res.n_done == STARTUP_STEPS   # step 129 (1-based)
+    assert res.monitor["startup_exempt_steps"] == STARTUP_STEPS
+
+
+def test_only_the_state_flag_is_exempt(layout, monkeypatch):
+    _, z = simulate_data(1, seed=3)
+    monkeypatch.setattr(ss, "predict", lambda pts, wm, buf, lay, cfg, n_substeps=None: np.full_like(pts, np.nan))
+    res = ukf.run_filter(z[:5], CFG, layout, Q_TEST)                    # NaN at step 1
+    assert res.diverged and res.divergence_step == 0
+    assert res.divergence_reason == "nan_inf" or res.divergence_reason.startswith("linalg_error")
+    monkeypatch.undo()
+    _, z5 = simulate_data(1, seed=5)
+    res = ukf.run_filter(z5, CFG, layout, 1.0e15)                       # covariance not PD at step 2, inside the window
+    assert res.divergence_reason == "covariance_not_pd" and res.divergence_step < STARTUP_STEPS
+    P = np.eye(layout.n)
+    x = ss.prior_mean(layout, CFG)
+    far = ss.initial_neural_state(CFG) + 20.0 * SD12
+    x[:12] = far
+    assert ukf._first_divergence(x, P, CFG, ss.initial_neural_state(CFG), SD12, 1.0, check_state=False) is None
+    assert ukf._first_divergence(x, P, CFG, ss.initial_neural_state(CFG), SD12, 1.0) == "state_beyond_sd_multiple"
+    Pn = P.copy()
+    Pn[0, 0] = np.nan
+    assert ukf._first_divergence(x, Pn, CFG, ss.initial_neural_state(CFG), SD12, 1.0, check_state=False) == "nan_inf"
+    assert ukf._first_divergence(x, P, CFG, ss.initial_neural_state(CFG), SD12, -1e-3, check_state=False)         == "covariance_not_pd"
+
+
+def test_reference_cache_refreshes_only_after_a_five_percent_move(layout, monkeypatch):
+    calls = []
+    real = ss.coupled_steady_state
+    monkeypatch.setattr(ss, "coupled_steady_state", lambda cfg, *a: (calls.append(a), real(cfg, *a))[1])
+    frac = CFG["ukf"]["divergence"]["reference_refresh_fraction_of_prior_sd"]
+    sd = ss.parameter_prior_sd(CFG)
+    ref = ukf.DivergenceReference(layout, CFG)
+    x = ss.prior_mean(layout, CFG)
+    assert np.array_equal(ref.center(x), ss.initial_neural_state(CFG)) and calls == []      # at the prior: no solve
+    p1_0 = x[layout.idx["p1"]]
+    x[layout.idx["p1"]] = p1_0 + 0.9 * frac * sd["p1"]
+    ref.center(x)
+    assert len(calls) == 0
+    x[layout.idx["p1"]] = p1_0 + 1.1 * frac * sd["p1"]
+    ref.center(x)
+    assert len(calls) == 1 and ref.n_updates == 1
+    x[layout.idx["p1"]] += 0.9 * frac * sd["p1"]                      # relative to the CACHED parameters now
+    ref.center(x)
+    assert len(calls) == 1
+    x[layout.idx["p1"]] += 0.9 * frac * sd["p1"]
+    ref.center(x)
+    assert len(calls) == 2
+    for name in ("g12", "g21", "log_rho1", "log_rho2", "p2"):        # each fixed-point parameter triggers it
+        n0 = len(calls)
+        x[layout.idx[name]] += 1.1 * frac * sd[name]
+        ref.center(x)
+        assert len(calls) == n0 + 1, name
+    n0 = len(calls)
+    x[layout.idx["m"]] += 0.4                                          # m is not part of the fixed point
+    ref.center(x)
+    assert len(calls) == n0
+    x_nan = x.copy()
+    x_nan[layout.idx["p1"]] = np.nan
+    assert np.array_equal(ref.center(x_nan), ref.ref) and len(calls) == n0    # non-finite: cached reference
+
+
+def test_reference_follows_removed_and_tied_quantities(monkeypatch):
+    calls = []
+    real = ss.coupled_steady_state
+    monkeypatch.setattr(ss, "coupled_steady_state", lambda cfg, *a: (calls.append(a), real(cfg, *a))[1])
+    cfg = copy.deepcopy(CFG)
+    cfg["state"]["reduction_switches"].update(fix_EI_terms=True, tie_p1_p2=True, tie_g12_g21=True)
+    lay = ss.make_layout(cfg)
+    ref = ukf.DivergenceReference(lay, cfg)
+    x = ss.prior_mean(lay, cfg)
+    x[lay.idx["p1"]] = 250.0
+    x[lay.idx["g12"]] = 9.0
+    ref.center(x)
+    lr = math.log(3.25 / 22)
+    assert calls == [(250.0, 250.0, lr, lr, 9.0, 9.0)]              # p2 tied, log_rho fixed, g21 tied
+    m1 = ss.make_layout(CFG, include_gains=False)
+    ref1 = ukf.DivergenceReference(m1, CFG)
+    x1 = ss.prior_mean(m1, CFG)
+    x1[m1.idx["p2"]] = 260.0
+    ref1.center(x1)
+    assert calls[-1][4:] == (0.0, 0.0)                                # M1: no gains
+
+
+def test_failed_fixed_point_falls_back_to_prior_reference_and_is_not_divergence(layout, monkeypatch):
+    calls = []
+
+    def boom(cfg, *a):
+        calls.append(a)
+        raise model.ModelError("no unique fixed point")
+    monkeypatch.setattr(ss, "coupled_steady_state", boom)
+    ref = ukf.DivergenceReference(layout, CFG)
+    x = shifted_x(layout, p2=260.0)
+    assert np.array_equal(ref.center(x), ss.initial_neural_state(CFG))       # the prior-parameter reference
+    assert ref.n_fallbacks == 1 and ref.n_updates == 0
+    ref.center(x)
+    assert len(calls) == 1                                            # not retried until a further move
+    _, z = simulate_data(3, seed=31, p=np.array(COUPLED_P))
+    res = ukf.run_filter(z, CFG, layout, Q_TEST)
+    assert not res.diverged and res.monitor["n_reference_fallbacks"] >= 1 and res.monitor["n_reference_updates"] == 0
 
 
 # ---- hygiene -------------------------------------------------------------------------------------------

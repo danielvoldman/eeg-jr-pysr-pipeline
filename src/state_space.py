@@ -187,6 +187,54 @@ def prior_cov(layout, cfg):
                              for i, name in enumerate(layout.names)], dtype=np.float64))
 
 
+# ---- coupled deterministic fixed point (§7.5 divergence reference; IMP-029) ---------------------
+
+def parameter_prior_sd(cfg):
+    """Prior SD of each quantity the fixed point depends on (§7.6)."""
+    pr = cfg["priors"]
+    g_sd = cfg["coupling"]["gain_prior_sd_factor_of_C2"] * model.constants(cfg)["C2"]
+    return {"p1": pr["p_sd"], "p2": pr["p_sd"], "log_rho1": pr["log_rho_sd"],
+            "log_rho2": pr["log_rho_sd"], "g12": g_sd, "g21": g_sd}
+
+
+def coupled_steady_state(cfg, p1, p2, log_rho1, log_rho2, g12, g21):
+    """Deterministic fixed point (y3 = y4 = y5 = 0, so the delay drops out) of the two coupled nodes.
+
+    With s_j = S(y1 - y2) of node j, node 2 sees the input p2 + g12 * s_1 and node 1 sees
+    p1 + g21 * s_2 (IMP-003 d), and each node is the uncoupled steady state at its own input
+    (model.steady_state, which raises unless the root is unique). The two values s are found
+    by a Newton iteration with a finite-difference Jacobian, started from the uncoupled steady
+    state; the result is the 12-vector (node 1 y0..y5, node 2 y0..y5). Raises StateSpaceError
+    if the iteration does not converge, and lets model.ModelError through.
+    """
+    k = model.constants(cfg)
+    ref = cfg["ukf"]["divergence"]
+    tol, max_iter = ref["fixed_point_tolerance"], int(ref["fixed_point_max_iterations"])
+    h = ref["fixed_point_fd_step"]
+    A1, B1 = rho_to_AB(np.exp(log_rho1), cfg)
+    A2, B2 = rho_to_AB(np.exp(log_rho2), cfg)
+
+    def nodes(s):
+        n1 = model.steady_state(p1 + g21 * s[1], A1, B1, cfg)
+        n2 = model.steady_state(p2 + g12 * s[0], A2, B2, cfg)
+        out = np.array([model.sigmoid(n[Y1] - n[Y2], k["e0"], k["v0"], k["r"]) for n in (n1, n2)])
+        return out, n1, n2
+
+    s = nodes(np.zeros(N_NODES))[0]                 # start: the uncoupled steady state (gains times zero)
+    for _ in range(max_iter):
+        f, n1, n2 = nodes(s)
+        r = s - f
+        if np.max(np.abs(r)) <= tol:
+            return np.concatenate([n1, n2])
+        jac = np.eye(N_NODES)
+        for j in range(N_NODES):
+            d = np.zeros(N_NODES)
+            d[j] = h
+            jac[:, j] -= (nodes(s + d)[0] - f) / h
+        s = np.clip(s - np.linalg.solve(jac, r), 0.0, 2.0 * k["e0"])
+    raise StateSpaceError(f"coupled fixed point did not converge in {max_iter} iterations")
+
+
 # ---- drift (§7.1, §8.1) ----------------------------------------------------------------
 
 @njit(fastmath=False)

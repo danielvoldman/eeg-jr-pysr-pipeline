@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.linalg import cholesky
 
+from src import model
 from src import state_space as ss
 
 log = logging.getLogger(__name__)
@@ -199,14 +200,58 @@ class FilterResult:
     monitor: dict = field(default_factory=dict)
 
 
-def _first_divergence(x_post, P_post, cfg, center, sd, min_eig):
-    """Reason string if this step is diverged (§7.5), else None."""
+class DivergenceReference:
+    """The reference point of the §7.5 divergence rule (IMP-029): the deterministic fixed point of the
+    coupled two-node model at the current posterior-mean parameters (p, rho, g), not at the prior ones.
+
+    center(x) returns the 12-vector reference for the state x. It is cached and recomputed only when
+    some parameter mean has moved more than reference_refresh_fraction_of_prior_sd of its prior SD from
+    the cached parameters. Quantities removed by the layout follow it (a tied p2 moves with p1, a fixed
+    log_rho never moves; M1 has zero gains). If the solve fails, the prior-parameter reference is used,
+    the failure is counted, and it is NOT a divergence. A non-finite x returns the cached reference
+    (the finiteness check of the divergence rule reports it).
+    """
+    KEYS = ("p1", "p2", "log_rho1", "log_rho2", "g12", "g21")
+
+    def __init__(self, layout, cfg):
+        self.layout, self.cfg = layout, cfg
+        self.prior_center = ss.initial_neural_state(cfg)
+        self.prior_params = self._params(ss.prior_mean(layout, cfg))
+        self.prior_sd = ss.parameter_prior_sd(cfg)
+        self.frac = cfg["ukf"]["divergence"]["reference_refresh_fraction_of_prior_sd"]
+        self.params, self.ref = self.prior_params, self.prior_center
+        self.n_updates = 0
+        self.n_fallbacks = 0
+
+    def _params(self, x):
+        q = self.layout.params(np.asarray(x, dtype=np.float64)[None])
+        return {k: float(q[k][0]) for k in self.KEYS}
+
+    def center(self, x):
+        cur = self._params(x)
+        if not all(np.isfinite(v) for v in cur.values()):
+            return self.ref
+        if all(abs(cur[k] - self.params[k]) <= self.frac * self.prior_sd[k] for k in self.KEYS):
+            return self.ref
+        try:
+            self.ref = ss.coupled_steady_state(self.cfg, *(cur[k] for k in self.KEYS))
+            self.n_updates += 1
+        except (model.ModelError, ss.StateSpaceError, np.linalg.LinAlgError):
+            self.ref = self.prior_center
+            self.n_fallbacks += 1
+        self.params = cur          # also after a failure: retried only after a further move
+        return self.ref
+
+
+def _first_divergence(x_post, P_post, cfg, center, sd, min_eig, check_state=True):
+    """Reason string if this step is diverged (§7.5), else None. check_state=False suppresses only the
+    state-beyond-10-SD flag (the start-up exemption, DEV-003)."""
     if not (np.all(np.isfinite(x_post)) and np.all(np.isfinite(P_post))):
         return "nan_inf"
     if min_eig + cfg["ukf"]["divergence"]["covariance_jitter"] <= 0.0:
         return "covariance_not_pd"
     mult = cfg["ukf"]["divergence"]["state_sd_multiple"]
-    if np.any(np.abs(x_post[:ss.N_NEURAL] - center) > mult * sd):
+    if check_state and np.any(np.abs(x_post[:ss.N_NEURAL] - center) > mult * sd):
         return "state_beyond_sd_multiple"
     return None
 
@@ -226,7 +271,8 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
     x0 = d_x0 if x0 is None else np.asarray(x0, dtype=np.float64)
     P0 = d_P0 if P0 is None else np.asarray(P0, dtype=np.float64)
     buf = d_buf if buffer is None else buffer
-    center = ss.initial_neural_state(cfg)
+    reference = DivergenceReference(layout, cfg)
+    n_exempt = int(round(cfg["ukf"]["divergence"]["startup_exempt_s"] * cfg["preprocessing"]["observation_fs_hz"]))
     sd = np.sqrt(np.tile(ss.neural_variance(cfg), ss.N_NODES))
     filt = UnscentedFilter(
         n, weights_for(n, cfg), process_noise(layout, cfg, q), obs_noise(cfg),
@@ -254,7 +300,8 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
         finite = bool(np.all(np.isfinite(filt.P)))
         min_eig = float(np.linalg.eigvalsh(sym)[0]) if finite else float("nan")
         res.min_eig[t] = min_eig          # stored before the check: the offending step counts (IMP-025)
-        reason = _first_divergence(filt.x, filt.P, cfg, center, sd, min_eig)
+        reason = _first_divergence(filt.x, filt.P, cfg, reference.center(filt.x), sd, min_eig,
+                                   check_state=t >= n_exempt)
         if reason is not None:
             res.diverged, res.divergence_step, res.divergence_reason = True, t, reason
             break
@@ -270,6 +317,8 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
         "min_eig_overall": float(seen.min()) if seen.size else float("nan"),
         "n_negative_eig_steps": int(np.count_nonzero(seen < 0.0)),
         "n_jitter_fallbacks": filt.n_jitter,
+        "startup_exempt_steps": n_exempt,
+        "n_reference_updates": reference.n_updates, "n_reference_fallbacks": reference.n_fallbacks,
         "nan_inf_seen": bool(res.divergence_reason == "nan_inf"),
         "diverged": res.diverged, "divergence_step": res.divergence_step,
         "divergence_reason": res.divergence_reason, "n_done": res.n_done,

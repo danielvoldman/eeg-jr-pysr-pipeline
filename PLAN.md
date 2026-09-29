@@ -202,6 +202,16 @@ Done when:
 
 Note (2026-09-29): done; IMP-024 to IMP-028, commit hashes of IMP-019 to IMP-023 filled in (a655db1). Mutation checks: restoring the broad catch, dropping the offending step from the monitor, and measuring the divergence from zero each make the new tests fail; the restored src/ukf.py is byte-identical (cmp). Measured: coupled test filtered g12 8.03 for a truth of 12 (g21 -0.15); the first attempt with p = (220, 260) tripped the 10 SD divergence rule (true node-2 mean y1 at 10.5 SD) and the asymmetry was reduced to (220, 235), band unchanged (IMP-026). Open finding for the pilot and G0: the 10 SD divergence rule is scaled by the small y1 SD, so nodes with a moderately shifted p or a moderate coupling drive are already flagged; look at this before real-data exclusions (§7.5, §12).
 
+### [x] C2c. Divergence reference at the current parameters
+Read: §7.5; IMP-021, IMP-026.
+Done when:
+- The reference of the state-beyond-10-SD rule is the deterministic (coupled) fixed point at the current posterior-mean parameters, cached and refreshed after a 5% of prior SD move, with a counted fallback (IMP-029).
+- The 10x multiple and the SD scale are unchanged.
+- The state flag alone is suppressed for the first 0.5 s after each (re)initialization (DEV-003).
+- The C2b coupled test runs with its original p = (220, 260), band and truth unchanged.
+
+Note (2026-09-29): done; IMP-029 and DEV-003. Coupled test with p = (220, 260): filtered g12 8.02, g21 -0.28, smoothed 8.76 and -0.80. False-flag measurement on 20 healthy synthetic series (p in [150, 300], gains in {0, 5, 12, 27}): 3 flagged (15, 18, 19) with the reference change alone, 2 flagged (15, 19) with the start-up exemption; series 15 and 19 (g = 27 both ways) have TRUE trajectories 13.8 and 36.1 SD from their own fixed point, so the rule flags strong two-way coupling (DEV-003 open risk, no regime exempted). Mutation checks: reference reverted to the prior parameters, reference measured from zero and exemption length 0 each make the new tests fail; restored files are byte-identical (cmp).
+
 ### [ ] C3. Two-pass parameter handling
 Read: §7.5 (parameter handling), §8.3, §10.2.
 Done when:
@@ -217,6 +227,7 @@ Done when:
 - The G0 mode uses the 20-series synthetic tuning set.
 
 ### [ ] C5. Numba port and validation (§21.2 #4)
+Note (C2c, c): time the divergence-reference refresh in the C5 benchmark. It runs on about 11 to 14 percent of steps (3 to 8 ms per fixed-point solve, pure Python around model.steady_state); it is not part of the Numba port yet.
 Read: §7.5, §16.5.2.
 Done when:
 - The filterpy Cholesky convention (upper-triangular) is confirmed from the installed source.
@@ -294,6 +305,8 @@ Done when:
 ### [ ] E4. Gate scoring and gate.json
 Read: §9.1–§9.4, §5.2, §18.1, §20.
 Note (C2b): the §9.3 identifiability check must report the posterior contraction of m. In observe() m is clipped to [0, 0.5] (IMP-016) and the prior spread (0.2 +- 0.66 at the sigma points) puts the two m-direction sigma points on the clip boundaries, so the filter sees less information about m; a poor contraction for m is a finding to log, not a reason to change the clip silently.
+Note (C2c, a): in the C2b coupled test (12 s, g12 = 12, g21 = 0, p = (220, 260)) the filter recovered g12 = 8.0 (smoothed 8.8), about 30 percent low, probably prior shrinkage toward 0 (prior SD 10.8, posterior SD 1.6). That is a likely risk for the G0 +/-15 percent gain-error criterion; look at it on the positive-control series before trusting that criterion.
+Note (C2c, b): the state-SD divergence rule flags strong two-way coupling (g near 27 both ways) because the SD scale comes from the uncoupled simulation (DEV-003 open risk). Check at G0 on synthetic data whether the strongest coupling level triggers it and decide then; no change was made.
 Done when:
 - The positive-control rule is implemented: median NRMSE ≤ 0.25 and median gain error ≤ 15%, from the second-weakest level up.
 - The null δ-band rule is implemented, with δ = half the weakest level.
