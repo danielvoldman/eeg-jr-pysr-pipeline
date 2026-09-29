@@ -60,6 +60,8 @@ dataset:
   session_second: {value: "ses-t2", prov: placeholder, ref: "§4.1", note: "IMP-007"}
   download_include: {value: ["/sub-*", "/code"], prov: placeholder, ref: "§4.2", note: "IMP-007; top-level files come in through openneuro-py's always-download rule; code/ is for reference only (s2_preprocess.m), not used by the pipeline"}
   download_exclude: {value: ["/derivatives"], prov: placeholder, ref: "§4.2", note: "IMP-007; derivative files are unsuitable"}
+  edf_suffix: {value: "_eeg.edf", prov: placeholder, ref: "§4.2, §6", note: "IMP-009; channels.tsv sits next to the EDF with this suffix replaced"}
+  channels_suffix: {value: "_channels.tsv", prov: placeholder, ref: "§4.2, §6", note: "IMP-009"}
   skip_scans_tsv: {value: {subject: "sub-010", session: "ses-t1", pattern: "*_scans.tsv"}, prov: locked, ref: "§4.2", note: "IMP-007; only this one scans.tsv is skipped, the EEG is downloaded"}
 
 # ---------------------------------------------------------------- download.py settings (IMP-007)
@@ -74,6 +76,7 @@ download:
 preprocessing:
   units_check:
     highpass_hz: {value: 0.5, prov: locked, ref: "§4.2"}
+    channel_type: {value: "EEG", prov: placeholder, ref: "§4.2", note: "IMP-009; channels.tsv type column; status, trigger and other non-EEG channels are excluded"}
     median_sd_min_uv: {value: 2, prov: locked, ref: "§4.2"}
     median_sd_max_uv: {value: 200, prov: locked, ref: "§4.2"}
     halt_if_fail_fraction_above: {value: 0.05, prov: locked, ref: "§4.2"}
@@ -83,13 +86,13 @@ preprocessing:
   bad_channel:
     rms_min_uv: {value: 5, prov: locked, ref: "§5.1", note: "doc writes ~5 and gives no status tag; treated as locked until told otherwise"}
     rms_max_uv: {value: 150, prov: locked, ref: "§5.1", note: "doc writes ~150 and gives no status tag; treated as locked until told otherwise"}
-    flatline_threshold: {value: null, prov: unset, ref: "§5.1", note: "doc names flat-line detection but gives no threshold"}
-    saturation_threshold: {value: null, prov: unset, ref: "§5.1", note: "doc names saturation detection but gives no threshold"}
+    flatline_threshold: {value: 0.1, prov: placeholder, ref: "§5.1", unit: "uV", note: "IMP-009; a 1-s segment (rejection.segment_length_s) of the band-passed, edge-trimmed electrode whose peak-to-peak is below this is flat"}
+    saturation_min_run_s: {value: 0.05, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009; saturated if the RAW uV signal has a run of at least ceil(this * fs) consecutive samples exactly equal to the channel's own recording max or min. The header-range rule was unworkable: EDF physical min/max equal each channel's own data range in ds003775"}
   line_noise:
     method: {value: "standard notch filter", prov: locked, ref: "§5.1"}
     freq_hz: {value: 50, prov: locked, ref: "§5.1"}
     include_harmonics: {value: true, prov: locked, ref: "§5.1"}
-    notch_width: {value: null, prov: unset, ref: "§5.1", note: "doc gives no notch width or Q"}
+    notch_q: {value: 30, prov: placeholder, ref: "§5.1", note: "IMP-009; quality factor of scipy.signal.iirnotch, applied zero-phase with filtfilt at freq_hz and every harmonic below Nyquist; fills the former unset notch_width"}
   bandpass:
     highpass_hz: {value: 0.5, prov: placeholder, ref: "§5.1"}
     lowpass_hz: {value: 45, prov: locked, ref: "§5.1", note: "no separate tag in the doc; treated as locked"}
@@ -114,6 +117,18 @@ preprocessing:
     pad_s: {value: 0.5, prov: locked, ref: "§5.1", note: "each side of every rejected event; no separate tag in the doc"}
     min_clean_stretch_s: {value: 5, prov: placeholder, ref: "§5.1"}
     forbidden_tests: {value: [normality, kurtosis, lilliefors], prov: locked, ref: "§5.1"}
+  edge_trim_s: {value: 1.0, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009; trimmed from BOTH ends after the band-pass (0.5 Hz high-pass)"}
+  edge_trim_s_sensitivity_highpass: {value: 10.0, prov: placeholder, ref: "§5.1, §5.2", unit: "s", note: "IMP-009; same, for the 0.1 Hz variant"}
+  edge_report:
+    seed: {value: 20260929, prov: placeholder, ref: "§5.1", note: "IMP-009; development report only, never used on data"}
+    sine_hz: {value: 10, prov: placeholder, ref: "§5.1", note: "IMP-009"}
+    sine_amplitude_uv: {value: 1.0, prov: placeholder, ref: "§5.1", note: "IMP-009"}
+    noise_sd_uv: {value: 1.0, prov: placeholder, ref: "§5.1", note: "IMP-009; SD of the 1/f component"}
+    noise_power_exponent: {value: 1.0, prov: placeholder, ref: "§5.1", note: "IMP-009; power spectrum proportional to f^-exponent"}
+    margin_s: {value: 60, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009; extra signal on each side, used to get the transient-free reference output"}
+    max_deviation_fraction_of_sd: {value: 0.01, prov: placeholder, ref: "§5.1", note: "IMP-009; STOP if the deviation after the trim exceeds this fraction of the filtered signal SD"}
+  cache:
+    subdir: {value: "preprocessed_b4", prov: placeholder, ref: "§18", note: "IMP-009; under paths.cache_dir"}
   min_clean_data_per_recording_s: {value: 60, prov: placeholder, ref: "§12"}
   strict_variant:
     emg_multiple_of_median: {value: 3, prov: locked, ref: "§5.2"}
@@ -422,8 +437,7 @@ compute:
 # then log the answer in DEVIATIONS.md §2 (IMP-nnn) and change the tag to `placeholder`.
 open_questions_for_implementation:
   - "rescaling.reference_simulation: seed, burn-in, single node vs two-node at g=0, integrator, noise redraw interval (PLAN.md A4)"
-  - "preprocessing.bad_channel: flat-line and saturation thresholds"
-  - "preprocessing.line_noise.notch_width (filter_family was settled in IMP-004)"
+  # decided in IMP-009 (now placeholders): bad_channel.flatline_threshold, bad_channel.saturation_min_run_s, line_noise.notch_q
   - "residual.tv_weight_grid: the 5 values"
   - "pysr.subsample.seed, g0.seeds, aaft.seed: seed values"
   - "pysr.version: exact version to pin at setup"
