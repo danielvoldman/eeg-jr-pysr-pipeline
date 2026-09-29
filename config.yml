@@ -357,7 +357,8 @@ g0:
 # ---------------------------------------------------------------- split, subjects, seeds (§11, §17)
 split:
   primary_seed: {value: 42, prov: locked, ref: "§11.1"}
-  extra_seeds: {value: null, prov: unset, ref: "§11.2", note: "4 more seeds are needed, values not given"}
+  extra_seeds: {value: [43, 44, 45, 46], prov: placeholder, ref: "§11.1, §11.2, §17", note: "IMP-008; pilots forced onto the training side, test set drawn from the other 99 subjects"}
+  pilot_draw_seed: {value: 42, prov: placeholder, ref: "§11.1, §11.2, §17", note: "IMP-008; own generator, drawn from the seed-42 training side"}
   n_split_seeds_total: {value: 5, prov: locked, ref: "§11.2"}
   train_fraction: {value: 0.70, prov: locked, ref: "§11.1"}
   n_train: {value: 78, prov: locked, ref: "§11.1"}
@@ -421,7 +422,6 @@ compute:
 # then log the answer in DEVIATIONS.md §2 (IMP-nnn) and change the tag to `placeholder`.
 open_questions_for_implementation:
   - "rescaling.reference_simulation: seed, burn-in, single node vs two-node at g=0, integrator, noise redraw interval (PLAN.md A4)"
-  - "split.extra_seeds: the 4 additional split seeds (PLAN.md B2)"
   - "preprocessing.bad_channel: flat-line and saturation thresholds"
   - "preprocessing.line_noise.notch_width (filter_family was settled in IMP-004)"
   - "residual.tv_weight_grid: the 5 values"

@@ -93,7 +93,7 @@ Note (2026-09-28): done; real download of ds003775 v1.2.1 completed and passed `
 ### [ ] B2. Split
 Read: §11.1, §17.
 Files: `main.py` writes `outputs/split_<seed>.json`.
-Note: the 4 extra split seed values are not specified in the document. Ask me.
+Note: the seeds are decided (IMP-008): primary 42; extra 43, 44, 45, 46; pilot draw seed 42.
 Done when tests show:
 - The split is made on all 111 IDs before exclusions, and the result is deterministic.
 - There are 78 training and 33 test subjects.
