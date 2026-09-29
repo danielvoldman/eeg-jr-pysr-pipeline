@@ -177,7 +177,7 @@ Note (2026-09-29): done; src/state_space.py, tests/test_state_space.py (model.py
 Note for Stage E (E2): the G0 generator must mix the deviations from mu_ref with M(m) and then rescale, to match the fitted observation model (IMP-015).
 Note for C3: clipping of the REPORTED recording-level m to [0, 0.5] is decided in C3 (IMP-016).
 
-### [ ] C2. Reference UKF and smoother (filterpy)
+### [x] C2. Reference UKF and smoother (filterpy)
 Read: §7.5, §7.6, §9.3.
 Done when tests show:
 - The scaled unscented transform uses α = 1, β = 2, κ = 0. At n = 19, the mean weights are 0 at the centre and 1/38 for every other point, and the covariance centre weight is 2.
@@ -187,6 +187,9 @@ Done when tests show:
 - The divergence definition is implemented.
 - Stability monitors catch negative eigenvalues and NaN/Inf.
 - The filter tracks the known states and parameters on A2 synthetic data.
+
+Note (2026-09-29): done; src/ukf.py (own NumPy, filterpy 1.4.5 algorithm reproduced exactly), tests/test_ukf.py, IMP-019 to IMP-023. filterpy==1.4.5 is installed as a test oracle only; forward filter and smoother agree with it to rtol 1e-10. Measured on simulated data: mean NIS 1.82 at q = 1e-2; pure-NumPy timing for one 60,000-step recording (234 s): forward 68.8 s (1.15 ms/step), forward with covariances 69.6 s plus smoother 62.5 s = 132 s; min covariance eigenvalue 3.8e-6, NIS 1.84.
+Note for C4: the filter replicates filterpy, so NIS uses an S without Q (IMP-019); q acts on NIS only through P (the next step's sigma spread). The rule still picks the q whose NIS is closest to 2.
 
 ### [ ] C3. Two-pass parameter handling
 Read: §7.5 (parameter handling), §8.3, §10.2.
