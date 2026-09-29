@@ -36,6 +36,7 @@ paths:
   gate_file: {value: "outputs/gate.json", prov: locked, ref: "§18.1"}
   summary_file: {value: "results/summary.json", prov: locked, ref: "§18.2"}
   equations_file: {value: "results/equations.tex", prov: locked, ref: "§18.2"}
+  exclusions_file: {value: "outputs/exclusions.json", prov: placeholder, ref: "§12, §18.1", note: "IMP-012; written only by phase 1 (later), never by a test; per-variant files get a suffix"}
   split_file_pattern: {value: "outputs/split_{seed}.json", prov: locked, ref: "§11.1"}
   phase_flag_pattern: {value: "outputs/phase{n}.done", prov: locked, ref: "§18.1"}
   pilot_phase_flag_pattern: {value: "results/pilot/phase{n}.done", prov: placeholder, ref: "§18.1", note: "IMP-002: §18.1 does not say where pilot flags live; kept apart from outputs/ so a pilot never unlocks a full run"}
@@ -110,12 +111,18 @@ preprocessing:
     detect_band_hz: {value: [0.5, 5.0], prov: placeholder, ref: "§5.1"}
     detect_threshold_robust_sd: {value: 6, prov: placeholder, ref: "§5.1", note: "MAD-based"}
     correct_window_s: {value: 0.25, prov: placeholder, ref: "§5.1", note: "+/- around each detected blink"}
+    mad_to_sd_factor: {value: 1.4826, prov: literature, ref: "§5.1", note: "IMP-012; robust SD = factor * MAD (consistent estimator of the SD of a Gaussian)"}
+    wavelet:
+      family: {value: "sym4", prov: placeholder, ref: "§5.1", note: "IMP-012; undecimated (stationary) wavelet transform, pywt.swt; the level (10 at 1024 Hz) and the altered detail levels (7 to 10) are derived from detect_band_hz and the sampling rate, not stored"}
+      clip_multiplier_robust_sd: {value: 3, prov: placeholder, ref: "§5.1", note: "IMP-012; inside a correction window an altered coefficient is clipped to +/- this * (mad_to_sd_factor * MAD of that level over the whole channel)"}
+      edge_pad_s: {value: 4, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-012; odd-reflect pad on both ends before the transform (rounded up to a multiple of 2**level), removed after the inverse"}
   rejection:
     segment_length_s: {value: 1.0, prov: locked, ref: "§5.1"}
     emg_band_hz: {value: [70, 110], prov: locked, ref: "§5.1", note: "power computed BEFORE the low-pass"}
     emg_multiple_of_median: {value: 5, prov: placeholder, ref: "§5.1"}
     pad_s: {value: 0.5, prov: locked, ref: "§5.1", note: "each side of every rejected event; no separate tag in the doc"}
     min_clean_stretch_s: {value: 5, prov: placeholder, ref: "§5.1"}
+    segment_rms_min_uv: {value: 1.0, prov: placeholder, ref: "§5.1, DEV-001", unit: "uV", note: "IMP-012; a 1-s segment of either bipolar channel with RMS below this is rejected; the upper bound is bad_channel.rms_max_uv (strict_variant.rms_max_uv)"}
     forbidden_tests: {value: [normality, kurtosis, lilliefors], prov: locked, ref: "§5.1"}
   edge_trim_s: {value: 5.0, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009, raised from 1.0 by IMP-010; trimmed from BOTH ends after the band-pass (0.5 Hz high-pass)"}
   edge_trim_s_sensitivity_highpass: {value: 25.0, prov: placeholder, ref: "§5.1, §5.2", unit: "s", note: "IMP-009, raised from 10.0 by IMP-010 (15.0 was still too short on ten seeds, then 25.0); same, for the 0.1 Hz variant"}
@@ -136,6 +143,10 @@ preprocessing:
     segment_rms_reference_uv: {value: 5.0, prov: placeholder, ref: "§5.1", unit: "uV", note: "IMP-011; the pre-DEV-001 lower bound, kept only as a second reference level in the segment RMS diagnostic; the pipeline does not use it"}
   cache:
     subdir: {value: "preprocessed_b4", prov: placeholder, ref: "§18", note: "IMP-009; under paths.cache_dir"}
+    subdir_b5: {value: "preprocessed_b5", prov: placeholder, ref: "§18", note: "IMP-012; under paths.cache_dir"}
+    schema_version: {value: 2, prov: placeholder, ref: "§18", note: "IMP-012; part of every cache key; 2 = B4 result also stores the notched bipolar signal"}
+  rescale:
+    ddof: {value: 1, prov: placeholder, ref: "§5.1", note: "IMP-012, IMP-006(c); SD convention of the per-recording rescaling; must equal rescaling.reference_simulation.ddof (tested)"}
   min_clean_data_per_recording_s: {value: 60, prov: placeholder, ref: "§12"}
   strict_variant:
     emg_multiple_of_median: {value: 3, prov: locked, ref: "§5.2"}

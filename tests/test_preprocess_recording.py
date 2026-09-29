@@ -633,7 +633,7 @@ def test_preprocess_imports_are_restricted_and_never_model():
     path = REPO_ROOT / "src" / "preprocess.py"
     names = _imports(path)
     allowed = {"argparse", "csv", "hashlib", "json", "logging", "math", "sys", "dataclasses", "fractions",
-               "pathlib", "numpy", "scipy.signal", "src.config", "mne"}
+               "pathlib", "numpy", "scipy.signal", "scipy.ndimage", "src.config", "mne", "pywt"}   # scipy.ndimage, pywt: B5 (IMP-012)
     assert names <= {n.split(".")[0] for n in allowed} | allowed, names
     tree = ast.parse(path.read_text(encoding="utf-8"))
     full = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)} | \
