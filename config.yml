@@ -31,6 +31,8 @@ paths:
   figures_dir: {value: "results/figures", prov: locked, ref: "§18"}
   pilot_results_dir: {value: "results/pilot", prov: locked, ref: "§18.1"}
   logs_dir: {value: "logs", prov: locked, ref: "§18"}
+  manifest_file: {value: "data/MANIFEST.sha256", prov: placeholder, ref: "§4.1, §18", note: "IMP-007"}
+  download_log: {value: "logs/download.log", prov: placeholder, ref: "§18", note: "IMP-007"}
   gate_file: {value: "outputs/gate.json", prov: locked, ref: "§18.1"}
   summary_file: {value: "results/summary.json", prov: locked, ref: "§18.2"}
   equations_file: {value: "results/equations.tex", prov: locked, ref: "§18.2"}
@@ -51,6 +53,22 @@ dataset:
   line_freq_hz: {value: 50, prov: locked, ref: "§4.1"}
   read_units: {value: "uV", prov: locked, ref: "§4.2", note: "always units='uV' when reading EDF (mne-bids issue #1044)"}
   sub010_special_case: {value: "keep EEG, skip only scans.tsv", prov: locked, ref: "§4.2"}
+  eeg_glob: {value: "sub-*/ses-*/eeg/*.edf", prov: placeholder, ref: "§4.1, §18", note: "IMP-007; recordings are found by this glob, never by name"}
+  scans_glob: {value: "sub-*/ses-*/*_scans.tsv", prov: placeholder, ref: "§4.2", note: "IMP-007; expected count = n_recordings minus the skipped file"}
+  subject_dir_glob: {value: "sub-*", prov: placeholder, ref: "§4.1", note: "IMP-007"}
+  session_first: {value: "ses-t1", prov: placeholder, ref: "§4.1", note: "IMP-007"}
+  session_second: {value: "ses-t2", prov: placeholder, ref: "§4.1", note: "IMP-007"}
+  download_include: {value: ["/sub-*", "/code"], prov: placeholder, ref: "§4.2", note: "IMP-007; top-level files come in through openneuro-py's always-download rule; code/ is for reference only (s2_preprocess.m), not used by the pipeline"}
+  download_exclude: {value: ["/derivatives"], prov: placeholder, ref: "§4.2", note: "IMP-007; derivative files are unsuitable"}
+  skip_scans_tsv: {value: {subject: "sub-010", session: "ses-t1", pattern: "*_scans.tsv"}, prov: locked, ref: "§4.2", note: "IMP-007; only this one scans.tsv is skipped, the EEG is downloaded"}
+
+# ---------------------------------------------------------------- download.py settings (IMP-007)
+download:
+  min_free_space_factor: {value: 2, prov: placeholder, ref: "§18", note: "IMP-007; stop if free space is under this multiple of the total to fetch"}
+  hash_chunk_bytes: {value: 1048576, prov: placeholder, ref: "§18", note: "IMP-007"}
+  max_retries: {value: 5, prov: placeholder, ref: "§18", note: "IMP-007; openneuro-py default"}
+  max_concurrent_downloads: {value: 5, prov: placeholder, ref: "§18", note: "IMP-007; openneuro-py default"}
+  metadata_max_retries: {value: 3, prov: placeholder, ref: "§18", note: "IMP-007"}
 
 # ---------------------------------------------------------------- preprocessing (§4.2, §5.1)
 preprocessing:
