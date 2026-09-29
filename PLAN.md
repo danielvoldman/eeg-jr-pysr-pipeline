@@ -21,7 +21,7 @@ This is the **build** order. The **run** order is different and is fixed by §16
 
 ## Stage A: Foundations and reference constants
 
-### [ ] A1. main.py skeleton
+### [x] A1. main.py skeleton
 Read: §16.2, §18, §18.1.
 Files: `main.py`, plus a small config-reading helper. §18 lists no separate config module, so ask before adding one.
 Done when:
@@ -30,6 +30,8 @@ Done when:
 - Phase N refuses to start without `outputs/phase{N-1}.done`.
 - Pilot output goes under `results/pilot/`.
 - Run-time folders are created by the code and never committed.
+
+Note (2026-09-28): done; main.py, src/config.py, tests/ (32 pass). Runners are stubs that exit 1 and never write a flag. IMP-001 and IMP-002 logged.
 
 ### [ ] A2. Jansen–Rit simulator (model.py)
 Read: §7.1, §7.3 (including the sigmoid), §7.2, §7.5 (delay), §7.6 (integrator), §8.1, §9.1 (generation rate).

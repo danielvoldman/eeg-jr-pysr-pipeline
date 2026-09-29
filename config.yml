@@ -36,6 +36,7 @@ paths:
   equations_file: {value: "results/equations.tex", prov: locked, ref: "§18.2"}
   split_file_pattern: {value: "outputs/split_{seed}.json", prov: locked, ref: "§11.1"}
   phase_flag_pattern: {value: "outputs/phase{n}.done", prov: locked, ref: "§18.1"}
+  pilot_phase_flag_pattern: {value: "results/pilot/phase{n}.done", prov: placeholder, ref: "§18.1", note: "IMP-002: §18.1 does not say where pilot flags live; kept apart from outputs/ so a pilot never unlocks a full run"}
 
 # ---------------------------------------------------------------- dataset (§4.1)
 dataset:

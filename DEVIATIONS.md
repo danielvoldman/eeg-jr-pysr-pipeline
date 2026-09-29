@@ -15,7 +15,8 @@ This section covers any change to a LOCKED item at any time, and any change to a
 
 | ID | Date | Section | Tag of changed item | Summary | Real data loaded? |
 |---|---|---|---|---|---|
-| (none yet) | | | | | |
+| IMP-001 | 2026-09-28 | §18 | §18 lists no config reader, tests or pytest config | config helper src/config.py, tests/ and pytest.ini added; §18 lists none of these. Also: pilot runs log to logs/phase{N}_pilot.log | none |
+| IMP-002 | 2026-09-28 | §18.1 | §18.1 puts pilot output under results/pilot/ but does not say where pilot phase flags live | Pilot flags at results/pilot/phase{n}.done. A pilot run reads and writes only pilot flags; a full run only outputs/ flags, so a pilot phase can never unlock a full phase | paths.pilot_phase_flag_pattern (placeholder) |
 
 **Entry template**
 
@@ -41,7 +42,8 @@ This section covers places where the document was silent or ambiguous and a conc
 
 | ID | Date | Section | Question | Choice | config.yml key |
 |---|---|---|---|---|---|
-| (none yet) | | | | | |
+| IMP-001 | 2026-09-28 | §18 | §18 lists no config reader, tests or pytest config | config helper src/config.py, tests/ and pytest.ini added; §18 lists none of these. Also: pilot runs log to logs/phase{N}_pilot.log | none |
+| IMP-002 | 2026-09-28 | §18.1 | §18.1 puts pilot output under results/pilot/ but does not say where pilot phase flags live | Pilot flags at results/pilot/phase{n}.done. A pilot run reads and writes only pilot flags; a full run only outputs/ flags, so a pilot phase can never unlock a full phase | paths.pilot_phase_flag_pattern (placeholder) |
 
 **Entry template**
 
