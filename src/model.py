@@ -317,29 +317,28 @@ def _filtered_trimmed(cfg, y, fs_hz):
     return z[trim:z.size - trim]
 
 
-def reference_statistics(cfg, y, fs_hz):
+def reference_statistics(cfg, y, fs_hz, return_n=False):
     """(mu, sigma) of a series: mean of the unfiltered y; SD (ddof from config) of the
     band-passed, downsampled, edge-trimmed series (§5.1). B5's per-recording rescaling
-    must use the same SD convention."""
+    must use the same SD convention. With return_n, also the number of samples in the SD."""
     z = _filtered_trimmed(cfg, y, fs_hz)
     ddof = cfg["rescaling"]["reference_simulation"]["ddof"]
-    return float(np.mean(y)), float(np.std(z, ddof=ddof))
+    stats = float(np.mean(y)), float(np.std(z, ddof=ddof))
+    return stats + (int(z.size),) if return_n else stats
 
 
 def compute_reference_constants(cfg, seed=None, keep_series=False):
-    """Simulate, then the same statistics as reference_statistics. Returns a dict; the
-    unfiltered series only if asked."""
+    """Simulate, then reference_statistics (the only mean and SD code). Returns a dict;
+    the unfiltered series only if asked."""
     ref = cfg["rescaling"]["reference_simulation"]
     seed = ref["seed"] if seed is None else seed
     t0 = time.perf_counter()
     y = simulate_reference(cfg, seed)
     t1 = time.perf_counter()
-    z = _filtered_trimmed(cfg, y, ref["sim_fs_hz"])
-    mu = float(np.mean(y))
-    sigma = float(np.std(z, ddof=ref["ddof"]))
+    mu, sigma, n_sigma = reference_statistics(cfg, y, ref["sim_fs_hz"], return_n=True)
     t2 = time.perf_counter()
     out = {"mu_ref": mu, "sigma_ref": sigma, "seed": seed,
-           "n_mu_samples": int(y.size), "n_sigma_samples": int(z.size),
+           "n_mu_samples": int(y.size), "n_sigma_samples": n_sigma,
            "simulate_s": t1 - t0, "statistics_s": t2 - t1}
     if keep_series:
         out["series"] = y
@@ -547,6 +546,7 @@ def main(argv=None, config_path=None):
         if args.dry_run:
             log.info("dry run: nothing written")
             return 0
+        check_git_state(args.expect_commit)     # the state may have changed during the compute
         write_reference_constants(config_path, result["mu_ref"], result["sigma_ref"],
                                   provenance_record(cfg, result, head, dirty), force=args.force)
         log.info("written to %s", config_path)

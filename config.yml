@@ -152,7 +152,7 @@ jansen_rit:
 simulator:
   steady_state_scan_points: {value: 2001, prov: placeholder, ref: "IMP-003", note: "grid over y0 in (0, 2*e0*A/a) scanned for sign changes of the fixed-point residual"}
   steady_state_bisection_iterations: {value: 100, prov: placeholder, ref: "IMP-003"}
-  sanity_welch_segment_s: {value: 8, prov: placeholder, ref: "IMP-003", note: "Welch segment length for the A2 sanity report (test only)"}
+  sanity_welch_segment_s: {value: 8, prov: placeholder, ref: "IMP-003", note: "Segment length for the A2 sanity report (test only); also used by the reference-constant alpha-peak diagnostic (IMP-005), which is a periodogram of non-overlapping Hann segments"}
 
 # ---------------------------------------------------------------- coupling and delay (§7.3, §8.1)
 coupling:

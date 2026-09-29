@@ -300,6 +300,9 @@ def test_stored_reference_constants_match_code():
     for key in ("mu_ref", "sigma_ref"):
         assert type(rs[key]) is float and math.isfinite(rs[key]), key
     result = model.compute_reference_constants(cfg, seed=42)
+    # rtol=1e-9: the same code on the same machine reproduces the stored values bit for bit
+    # (test_compute_equals_stored_exactly); 1e-9 only leaves room for library round-off on
+    # other machines. A failure means investigate, not loosen.
     np.testing.assert_allclose(result["mu_ref"], rs["mu_ref"], rtol=1e-9, atol=0.0)
     np.testing.assert_allclose(result["sigma_ref"], rs["sigma_ref"], rtol=1e-9, atol=0.0)
     prov = rs["computed_provenance"]
@@ -308,3 +311,93 @@ def test_stored_reference_constants_match_code():
     assert prov["burn_in_s"] == 10
     assert prov["ddof"] == 1
     assert prov["edge_trim_s"] == 5
+    assert prov["n_mu_samples"] == 1228800
+    assert prov["n_sigma_samples"] == 151040
+    assert prov["units"] == "mV (model output units)"
+    assert prov["sim_fs_hz"] == 2048
+    assert prov["observation_fs_hz"] == 256
+    assert re.fullmatch(r"[0-9a-f]{40}", prov["git_commit"])
+
+
+# ---- single statistics path; ddof; main() end to end (A4 fix round) ------------------------------
+
+def test_compute_calls_reference_statistics_exactly_once(monkeypatch):
+    calls = []
+    real = model.reference_statistics
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(model, "reference_statistics", spy)
+    r = model.compute_reference_constants(short_cfg(30, 2), seed=5)
+    assert len(calls) == 1
+    y = model.simulate_reference(short_cfg(30, 2), seed=5)
+    assert (r["mu_ref"], r["sigma_ref"]) == real(short_cfg(30, 2), y, FS)
+
+
+def test_compute_equals_stored_exactly():
+    rs = load_config()["rescaling"]
+    result = model.compute_reference_constants(CFG, seed=42)
+    assert result["mu_ref"] == rs["mu_ref"]
+    assert result["sigma_ref"] == rs["sigma_ref"]
+
+
+def test_reference_statistics_ddof_is_sample_sd(monkeypatch):
+    # Bypass the filter so the SD of a short array can be computed by hand with plain math.
+    z = [1.0, 2.0, 3.0, 4.0, 10.0]
+    monkeypatch.setattr(model, "_filtered_trimmed", lambda cfg, y, fs: np.array(z))
+    mean = sum(z) / len(z)
+    ss = sum((v - mean) ** 2 for v in z)                 # 50
+    sd1, sd0 = math.sqrt(ss / (len(z) - 1)), math.sqrt(ss / len(z))
+    assert abs(sd1 - sd0) > 0.3                           # far above the tolerance below
+    assert REF["ddof"] == 1
+    _, sigma = model.reference_statistics(CFG, np.zeros(5), FS)
+    assert abs(sigma - sd1) < 1e-12
+    assert abs(sigma - sd0) > 0.3
+
+
+def _short_main_config(cfg_copy):
+    """cfg_copy (three A4 leaves null) with a 30 s + 2 s reference simulation."""
+    text = cfg_copy.read_bytes().decode("utf-8")
+    text, n1 = re.subn(r"(    duration_s: \{value: )600", r"\g<1>30", text, count=1)
+    text, n2 = re.subn(r"(    burn_in_s: \{value: )10", r"\g<1>2", text, count=1)
+    assert (n1, n2) == (1, 1)
+    cfg_copy.write_bytes(text.encode("utf-8"))
+    return cfg_copy
+
+
+def test_main_real_write_end_to_end(monkeypatch, cfg_copy):
+    path = _short_main_config(cfg_copy)
+    fake_git(monkeypatch, "a" * 40, "")
+    assert model.main(["--compute-reference", "--expect-commit", "a" * 40], config_path=path) == 0
+    rs = load_config(path)["rescaling"]
+    expected = model.compute_reference_constants(load_config(path), seed=42)
+    assert rs["mu_ref"] == expected["mu_ref"] and rs["sigma_ref"] == expected["sigma_ref"]
+    prov = rs["computed_provenance"]
+    assert prov["git_commit"] == "a" * 40 and prov["git_dirty"] is False
+    assert prov["seed"] == 42 and prov["kept_duration_s"] == 30 and prov["ddof"] == 1
+    assert prov["n_mu_samples"] == 30 * FS
+    assert prov["n_sigma_samples"] == 20 * FS_OBS
+
+
+def test_main_refuses_when_git_state_changes_before_write(monkeypatch, cfg_copy):
+    path = _short_main_config(cfg_copy)
+    state = {"head": "a" * 40, "porcelain": ""}
+    monkeypatch.setattr(model, "_git", lambda args: {"rev-parse": state["head"] + "\n",
+                                                     "status": state["porcelain"]}[args[0]])
+    real_diag = model.reference_diagnostics
+
+    def diag_then_edit(cfg, result):
+        out = real_diag(cfg, result)
+        state["porcelain"] = " M src/model.py\n"          # tree gets dirty during the compute
+        return out
+    monkeypatch.setattr(model, "reference_diagnostics", diag_then_edit)
+    before = path.read_bytes()
+    assert model.main(["--compute-reference", "--expect-commit", "a" * 40], config_path=path) == 1
+    assert path.read_bytes() == before
+    state["porcelain"] = ""
+    state["head"] = "b" * 40                                # HEAD moves instead
+    monkeypatch.setattr(model, "reference_diagnostics",
+                        lambda cfg, result: (state.update(head="c" * 40), real_diag(cfg, result))[1])
+    assert model.main(["--compute-reference", "--expect-commit", "b" * 40], config_path=path) == 1
+    assert path.read_bytes() == before
