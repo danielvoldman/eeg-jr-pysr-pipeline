@@ -222,6 +222,9 @@ class DivergenceReference:
         self.params, self.ref = self.prior_params, self.prior_center
         self.n_updates = 0
         self.n_fallbacks = 0
+        if layout.fixed_params is not None:
+            # pass 2 window: the parameters never change, so the reference is solved once, at them (IMP-032)
+            self._solve(self.prior_params)
 
     def _params(self, x):
         q = self.layout.params(np.asarray(x, dtype=np.float64)[None])
@@ -233,6 +236,10 @@ class DivergenceReference:
             return self.ref
         if all(abs(cur[k] - self.params[k]) <= self.frac * self.prior_sd[k] for k in self.KEYS):
             return self.ref
+        self._solve(cur)
+        return self.ref
+
+    def _solve(self, cur):
         try:
             self.ref = ss.coupled_steady_state(self.cfg, *(cur[k] for k in self.KEYS))
             self.n_updates += 1
@@ -240,7 +247,6 @@ class DivergenceReference:
             self.ref = self.prior_center
             self.n_fallbacks += 1
         self.params = cur          # also after a failure: retried only after a further move
-        return self.ref
 
 
 def _first_divergence(x_post, P_post, cfg, center, sd, min_eig, check_state=True):

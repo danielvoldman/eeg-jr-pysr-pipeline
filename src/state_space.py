@@ -55,6 +55,7 @@ class Layout:
     tie_g: bool
     include_gains: bool
     log_rho_fixed: float     # value of log_rho when it is not in the state
+    fixed_params: dict = None   # all seven parameters held constant (pass 2 windows, IMP-032); names are then neural only
 
     @property
     def n(self):
@@ -67,6 +68,9 @@ class Layout:
     def params(self, X):
         """Dict of the seven parameters, each an array of shape X.shape[:-1]."""
         X = np.asarray(X, dtype=np.float64)
+        if self.fixed_params is not None:
+            return {k: np.full(X.shape[:-1], self.fixed_params[k], dtype=np.float64)
+                    for k in PARAM_NAMES_FULL}
         ix = self.idx
         zero = np.zeros(X.shape[:-1], dtype=np.float64)
 
@@ -116,6 +120,21 @@ def make_layout(cfg, include_gains=True):
     return Layout(names=names, tie_p=bool(sw["tie_p1_p2"]),
                   tie_g=bool(sw["tie_g12_g21"]) and include_gains,
                   include_gains=include_gains, log_rho_fixed=log_rho_prior_mean(cfg))
+
+
+def make_fixed_layout(cfg, params):
+    """12-D neural-only layout whose seven slow parameters are constants (pass 2 windows, §7.5, §10.2).
+
+    `params` maps p1, p2, log_rho1, log_rho2, g12, g21, m to floats (the recording-level values).
+    Nothing but the 12 neural states is in the state, so no parameter can be re-estimated inside a
+    window (the shrinkage problem of §7.5)."""
+    check_delay_guard(cfg)
+    missing = [k for k in PARAM_NAMES_FULL if k not in params]
+    if missing:
+        raise StateSpaceError(f"fixed parameters missing: {missing}")
+    return Layout(names=NEURAL_NAMES, tie_p=False, tie_g=False, include_gains=True,
+                  log_rho_fixed=log_rho_prior_mean(cfg),
+                  fixed_params={k: float(params[k]) for k in PARAM_NAMES_FULL})
 
 
 # ---- E/I reparameterization (§7.6) -----------------------------------------------------

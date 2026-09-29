@@ -293,6 +293,10 @@ ukf:
     dtype: {value: "float64", prov: locked, ref: "§7.5, §16.5.2"}
     cholesky_convention: {value: "upper-triangular (SciPy default); rows of U are sigma-point offsets", prov: locked, ref: "§7.5", note: "verify against installed filterpy source"}
 
+# ---------------------------------------------------------------- two-pass parameter handling (§7.5, §9.2, §11.3; C3)
+passes:
+  estimator_burn_in_s: {value: 6, prov: placeholder, ref: "§9.2, §11.3, IMP-033", note: "burn-in of the causal filtered-gain estimator, counted in processed clean seconds from the first segment (parameters are carried across segments); measured on synthetic 12 s series: first time the filtered gain stays within 20% of its final value, worst of 8 traces 5.66 s, rounded up, minimum 5 s"}
+
 # ---------------------------------------------------------------- windows and C4 scoring (§10)
 windows:
   training_window_s: {value: 2, prov: locked, ref: "§10.2"}

@@ -212,11 +212,14 @@ Done when:
 
 Note (2026-09-29): done; IMP-029 and DEV-003. Coupled test with p = (220, 260): filtered g12 8.02, g21 -0.28, smoothed 8.76 and -0.80. False-flag measurement on 20 healthy synthetic series (p in [150, 300], gains in {0, 5, 12, 27}): 3 flagged (15, 18, 19) with the reference change alone, 2 flagged (15, 19) with the start-up exemption; series 15 and 19 (g = 27 both ways) have TRUE trajectories 13.8 and 36.1 SD from their own fixed point, so the rule flags strong two-way coupling (DEV-003 open risk, no regime exempted). Mutation checks: reference reverted to the prior parameters, reference measured from zero and exemption length 0 each make the new tests fail; restored files are byte-identical (cmp).
 
-### [ ] C3. Two-pass parameter handling
+### [x] C3. Two-pass parameter handling
 Read: §7.5 (parameter handling), §8.3, §10.2.
 Done when:
 - Recording-level parameters are the mean of the smoothed trajectory after burn-in.
 - The windowed pass uses 2-s windows, re-initializes the 12 neural states, holds the parameters fixed, and discards 0.5 s of burn-in.
+
+Note (2026-09-29): done; src/passes.py (new), tests/test_passes.py, tests/sim_data.py, small changes to state_space.py (Layout.fixed_params, make_fixed_layout) and ukf.py (DivergenceReference at fixed parameters), IMP-030 to IMP-036; commit hashes of IMP-024 to IMP-029 and DEV-003 filled in. Pass 1 carries the parameter mean and covariance across segments with gap inflation (IMP-030); recording-level m is the mean of clipped values (IMP-031); estimator burn-in measured at 6 s (IMP-033); windows start from the literal section 7.6 state, deviation at 0.5 s at most 1.17 SD (IMP-034); recording_diverged = OR of both passes (IMP-035). Measured recovery (bands fixed first): g12 10.47 [12], g21 -1.42 [0], p1 232.7 [220], p2 259.8 [260], m 0.328 [0.35], log rho -1.93 and -1.89 [-1.91]; on 8 segments of 7500 samples g12 12.11 [12], g21 4.73 [5]. Runtime for 60,000 samples on one core: pass 1 105.6 s, pass 2 86.8 s (a 12-D window costs 1.51 ms per sample, more than expected). Mutation checks (parameters left in the window state, windows crossing a gap, burn-in not discarded in either pass, carry replaced by restart) each make the tests fail; restored files byte-identical (cmp). Leakage control: gains re-estimated inside the windows give a mean g12 of 10.0 (range 5.75 to 13.54) against 10.47 fixed.
+Deferred (IMP-036): the section 11.3 frozen-model gain estimator (base + frozen PySR residual) needs a residual hook in the predict step and belongs to G4. The pass-1 filtered-gain mean is exposed as the section 9.2 null-gate estimator.
 
 ### [ ] C4. Q/R rule
 Read: §7.5, §7.6.
@@ -350,6 +353,7 @@ Done when the ≥ 70% signature recurrence and the "C1 passes in ≥ 4 of 5 seed
 
 ### [ ] G4. C3 ICC
 Read: §11.3, §15.
+Note (C3): the section 11.3 estimator (frozen base + PySR residual model) is deferred here: it needs a residual hook in ukf/state_space predict. Until then passes.Pass1Result.gain_estimate gives the base-model filtered-gain mean (the section 9.2 null-gate estimator).
 Done when:
 - ICC(3,1) is computed per direction, with an F-based confidence interval.
 - It is computed for all pairs and for test-only pairs.
