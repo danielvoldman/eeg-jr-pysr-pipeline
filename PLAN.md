@@ -90,7 +90,7 @@ Done when:
 
 Note (2026-09-28): done; real download of ds003775 v1.2.1 completed and passed `download.py --verify`. Manifest summary line: "# files=632 manifest_sha256=ba7785725f5f9fb3d74345a5db82276b8550de286dd044fd5896cd821ffa64b5 dataset=ds003775 version=1.2.1 openneuro_py=2026.9.1". Longest absolute path in data/ is 149 characters. One file hit a transient DNS error during the download and was retried automatically by the tool; all size and hash checks passed afterwards. Code in commit 7252c34 (IMP-007).
 
-### [ ] B2. Split
+### [x] B2. Split
 Read: §11.1, §17.
 Files: `main.py` writes `outputs/split_<seed>.json`.
 Note: the seeds are decided (IMP-008): primary 42; extra 43, 44, 45, 46; pilot draw seed 42.
@@ -100,6 +100,12 @@ Done when tests show:
 - Each subject's t2 recording is on the same side as their t1.
 - 12 pilot subjects (4 of them with t2) are drawn from the training side.
 - The pilot subjects are on the training side in all 5 seeds.
+
+Note (2026-09-29): done; real split written with `main.py --make-split` (code commit 3b8b419, IMP-008). A second run reported "unchanged" for all five seeds and rewrote nothing (modification times identical). outputs/ is git-ignored, so the hashes below are the record. The split files must never be redrawn (§11.1).
+- SHA-256: split_42.json 90072cd0a1cb5ee276d9320827f8e2eb48104e41584922255607cb71cbd406e4; split_43.json 33536cddb78fa2f048e44de0ce1ae8fc1c9c5ddb71c6fc64dc6156aaf7260382; split_44.json ee6e7144168233b24248621b292f195d90bda8025b0bafa31be0ae80e2ec45ea; split_45.json 7d75b781130cb74dbb03fd267262207f7f43d09d68403bc355ccf7b11a3a1035; split_46.json e9452bd22e64688248af8565caf6aab473c1963a885b86a0d217da49b8e5a435.
+- numpy version stored in the files: 2.5.3. Manifest: ds003775 v1.2.1, manifest_sha256=ba7785725f5f9fb3d74345a5db82276b8550de286dd044fd5896cd821ffa64b5.
+- Per seed: 78 train, 33 test, 12 pilot; pilot within train, disjoint from test, train and test disjoint. t2 subjects on the test side: seed 42 = 8, 43 = 16, 44 = 11, 45 = 12, 46 = 9 (of 42 t2 subjects in total).
+- The 12 pilot IDs, identical in all five seeds: sub-005, sub-008, sub-019, sub-051, sub-056, sub-063, sub-074, sub-081, sub-082, sub-086, sub-088, sub-107.
 
 ### [ ] B3. Loading and units check
 Read: §4.2, §5.1 steps 1–2.
