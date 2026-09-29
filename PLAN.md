@@ -136,6 +136,8 @@ Done when:
 
 ## Stage C: State-space model and UKF (model.py)
 
+Note: Before any phase >= 2 gets a real runner: check_prerequisite must also read outputs/gate.json and carry any low_confidence flag forward (CLAUDE.md rule 6, §18.1). Add tqdm progress bars when phases have real work (§18).
+
 ### [ ] C1. Augmented state-space model
 Read: §7.2, §7.4, §7.6.
 Done when:

@@ -1,6 +1,7 @@
 import ast
 import multiprocessing
 import os
+import shutil
 import subprocess
 import sys
 
@@ -35,7 +36,14 @@ def test_env_set_on_import_before_numpy_runtime():
     assert values.split() == ["1", "1", "1", "8"]
 
 
+def _isolate_env(monkeypatch):
+    """Register every thread variable with monkeypatch so bootstrap changes are undone."""
+    for name in ENV_NAMES:
+        monkeypatch.setenv(name, "unset-by-test")
+
+
 def test_bootstrap_overrides_inherited_values(monkeypatch):
+    _isolate_env(monkeypatch)
     monkeypatch.setenv("OMP_NUM_THREADS", "16")
     main._bootstrap_env()
     assert os.environ["OMP_NUM_THREADS"] == "1"
@@ -64,11 +72,18 @@ def test_only_allowed_imports_precede_bootstrap():
     assert seen_call and checked > 0
 
 
+def test_julia_threads_matches_env_var():
+    cfg = load_config(REPO_ROOT / "config.yml")
+    env = cfg["compute"]["env_vars_before_numpy_import"]
+    assert cfg["compute"]["julia_threads"] == int(env["PYTHON_JULIACALL_THREADS"])
+
+
 # ---- spawned worker sees 1 BLAS thread --------------------------------------
 
 def test_spawned_worker_single_blas_thread(monkeypatch):
+    _isolate_env(monkeypatch)
     for name in ENV_NAMES:
-        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name)
     main._bootstrap_env()  # parent sets env before the pool starts
     import _worker
     ctx = multiprocessing.get_context("spawn")
@@ -182,8 +197,27 @@ def test_runtime_dirs_ignored_by_git():
         assert r.returncode == 0, f"{d} is not git-ignored"
 
 
-def test_end_to_end_cli_stub_exit_code(temp_root):
-    """The real entry point, run as a script, exits non-zero for a stub."""
-    r = subprocess.run([sys.executable, str(REPO_ROOT / "main.py"), "--phase", "3"],
-                       cwd=REPO_ROOT, capture_output=True, text=True)
-    assert r.returncode == main.EXIT_PREREQ  # no outputs/phase2.done in the real repo
+@pytest.fixture
+def cli_copy(tmp_path):
+    """A temporary copy of main.py, src/ and config.yml; the real repo is never touched."""
+    shutil.copy(REPO_ROOT / "main.py", tmp_path / "main.py")
+    shutil.copy(REPO_ROOT / "config.yml", tmp_path / "config.yml")
+    shutil.copytree(REPO_ROOT / "src", tmp_path / "src",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    return tmp_path
+
+
+def _run_cli(root, phase):
+    return subprocess.run([sys.executable, str(root / "main.py"), "--phase", str(phase)],
+                          cwd=root, capture_output=True, text=True)
+
+
+def test_cli_phase3_refused_without_prerequisite(cli_copy):
+    """Run as a script, phase 3 without phase2.done hits the prerequisite gate: exit 2."""
+    assert _run_cli(cli_copy, 3).returncode == main.EXIT_PREREQ
+
+
+def test_cli_phase1_stub_fails_without_flag(cli_copy):
+    """Run as a script, the phase 1 stub exits 1 and writes no phase1.done."""
+    assert _run_cli(cli_copy, 1).returncode == main.EXIT_FAILED
+    assert not _flag(cli_copy, 1).exists()
