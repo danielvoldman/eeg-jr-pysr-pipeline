@@ -111,11 +111,14 @@ preprocessing:
     detect_band_hz: {value: [0.5, 5.0], prov: placeholder, ref: "§5.1"}
     detect_threshold_robust_sd: {value: 6, prov: placeholder, ref: "§5.1", note: "MAD-based"}
     correct_window_s: {value: 0.25, prov: placeholder, ref: "§5.1", note: "+/- around each detected blink"}
-    mad_to_sd_factor: {value: 1.4826, prov: literature, ref: "§5.1", note: "IMP-012; robust SD = factor * MAD (consistent estimator of the SD of a Gaussian)"}
+    max_corrected_fraction: {value: 0.10, prov: placeholder, ref: "§12", note: "IMP-013; a recording is excluded (excessive_blink_correction) if the corrected time of EITHER bipolar channel exceeds this fraction of the edge-trimmed recording; the correction runs before the RMS upper-bound rule and could hide large slow artefacts"}
+    report_corrected_fraction: {value: 0.05, prov: placeholder, ref: "§12", note: "IMP-013; print-only: --segment-report marks recordings whose corrected fraction is above this"}
+    mad_to_sd_factor: {value: 1.4826, prov: literature, ref: "normal-distribution relation between MAD and SD: SD = MAD / Phi^-1(0.75), 1/Phi^-1(0.75) = 1.4826 (not from §5.1)", note: "IMP-012, IMP-013; robust SD = factor * MAD (consistent estimator of the SD of a Gaussian)"}
     wavelet:
       family: {value: "sym4", prov: placeholder, ref: "§5.1", note: "IMP-012; undecimated (stationary) wavelet transform, pywt.swt; the level (10 at 1024 Hz) and the altered detail levels (7 to 10) are derived from detect_band_hz and the sampling rate, not stored"}
       clip_multiplier_robust_sd: {value: 3, prov: placeholder, ref: "§5.1", note: "IMP-012; inside a correction window an altered coefficient is clipped to +/- this * (mad_to_sd_factor * MAD of that level over the whole channel)"}
-      edge_pad_s: {value: 4, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-012; odd-reflect pad on both ends before the transform (rounded up to a multiple of 2**level), removed after the inverse"}
+      edge_pad_s: {value: 4, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-012, IMP-013; odd-reflect pad of ceil(edge_pad_s * fs) samples on both ends, plus a tail on the right so that the padded length is a multiple of 2**level; removed after the inverse"}
+      reflect_type: {value: "odd", prov: placeholder, ref: "§5.1", note: "IMP-013; numpy reflect_type of the wavelet pad"}
   rejection:
     segment_length_s: {value: 1.0, prov: locked, ref: "§5.1"}
     emg_band_hz: {value: [70, 110], prov: locked, ref: "§5.1", note: "power computed BEFORE the low-pass"}
@@ -145,6 +148,8 @@ preprocessing:
     subdir: {value: "preprocessed_b4", prov: placeholder, ref: "§18", note: "IMP-009; under paths.cache_dir"}
     subdir_b5: {value: "preprocessed_b5", prov: placeholder, ref: "§18", note: "IMP-012; under paths.cache_dir"}
     schema_version: {value: 2, prov: placeholder, ref: "§18", note: "IMP-012; part of every cache key; 2 = B4 result also stores the notched bipolar signal"}
+  exclusions:
+    schema_version: {value: 1, prov: placeholder, ref: "§12, §18.1", note: "IMP-013; schema number written into outputs/exclusions.json"}
   rescale:
     ddof: {value: 1, prov: placeholder, ref: "§5.1", note: "IMP-012, IMP-006(c); SD convention of the per-recording rescaling; must equal rescaling.reference_simulation.ddof (tested)"}
   min_clean_data_per_recording_s: {value: 60, prov: placeholder, ref: "§12"}

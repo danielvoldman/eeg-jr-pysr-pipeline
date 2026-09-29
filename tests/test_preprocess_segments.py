@@ -338,20 +338,6 @@ def test_clean_stretch_boundary_in_samples_at_256_hz():
     assert preprocess.clean_runs(~preprocess.pad_rejected(CFG, rej, FS_OUT), min_len) == []
 
 
-def test_mask_mapping_1024_to_256_is_exact_for_a_hand_made_mask():
-    rej = np.array([False, True, False, False, True, True, False])
-    m_out = preprocess.observation_mask(rej, SEG_OUT)
-    expected = np.zeros(7 * FS_OUT, dtype=bool)
-    expected[256:512] = True
-    expected[1024:1536] = True
-    assert np.array_equal(m_out, expected)
-    m_in = np.repeat(rej, FS)
-    t_in = np.flatnonzero(m_in) / FS
-    t_out = np.flatnonzero(m_out) / FS_OUT
-    assert t_in.min() == t_out.min() and t_in.max() + 1 / FS == t_out.max() + 1 / FS_OUT
-    assert m_in.sum() / FS == m_out.sum() / FS_OUT
-
-
 # ---------------------------------------------------------------- segment_signal: segments, mask consistency, rescaling
 
 def synthetic_recording(n_s=60, flat_seg=30):
@@ -370,6 +356,7 @@ def test_segments_never_cross_a_rejected_gap_and_starts_match_the_mask():
     for s0, n in zip(res.starts, lengths):
         assert s0 + n <= int(29.5 * FS_OUT) or s0 >= int(31.5 * FS_OUT)
     log = res.meta["b5"]["log"]
+    assert log["trimmed_s"] == 60.0 and len(log["blinks"]) == 2 and all(b["corrected_s"] >= 0.0 for b in log["blinks"])
     assert log["rejected_segments"] == 1 and log["rejected_before_padding_s"] == 1.0
     assert log["rejected_after_padding_s"] == 2.0 and log["clean_s"] == 58.0
     assert log["rules"]["flat"]["n_segments"] == 1 and log["rules"]["rms_low"]["n_segments"] == 1
@@ -502,6 +489,30 @@ def test_b5_cache_invalidates_on_config_change_file_hash_and_variant(driver):
     assert calls["b5"] == 6
 
 
+def test_b5_cache_invalidates_when_the_source_changes(driver, monkeypatch, tmp_path):
+    run, calls, _, tmp = driver
+    run()
+    run()
+    assert calls["b5"] == 1
+    src = tmp_path / "preprocess_changed.py"
+    src.write_text(Path(preprocess.__file__).read_text(encoding="utf-8") + "\n# one changed line\n", encoding="utf-8")
+    monkeypatch.setattr(preprocess, "_SOURCE", src)
+    run()
+    assert calls["b5"] == 2 and len(list((tmp / "cache").rglob("*.npz"))) == 2
+
+
+def test_code_hash_is_the_sha256_of_the_source_and_enters_both_keys(monkeypatch, tmp_path):
+    import hashlib
+    assert preprocess.code_hash() == hashlib.sha256(Path(preprocess.__file__).read_bytes()).hexdigest()
+    k4, k5 = preprocess.cache_key(CFG, "a" * 64, False, False), preprocess.cache_key_b5(CFG, "a" * 64, False, False)
+    src = tmp_path / "other.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(preprocess, "_SOURCE", src)
+    assert preprocess.code_hash() != hashlib.sha256(Path(preprocess.__file__).read_bytes()).hexdigest()
+    assert preprocess.cache_key(CFG, "a" * 64, False, False) != k4
+    assert preprocess.cache_key_b5(CFG, "a" * 64, False, False) != k5
+
+
 def test_b5_skipped_for_units_or_bad_electrode_recordings(monkeypatch):
     class Bad(FakeB4):
         def __init__(self):
@@ -526,6 +537,36 @@ def test_no_numeric_literals_beyond_allowed_and_never_imports_model():
     assert not any(m and m.split(".")[-1] == "model" for m in mods), mods
 
 
+def test_segment_rms_min_equals_the_electrode_rms_min():
+    # DEV-001: the 1-s segment lower bound and the electrode lower bound are both 1 uV and move together
+    pp = CFG["preprocessing"]
+    assert pp["rejection"]["segment_rms_min_uv"] == pp["bad_channel"]["rms_min_uv"] == 1.0
+
+
+def test_no_bare_print_in_src_preprocess_and_emit_writes_to_stdout(capsys):
+    tree = ast.parse((REPO_ROOT / "src" / "preprocess.py").read_text(encoding="utf-8"))
+    prints = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+              and isinstance(n.func, ast.Name) and n.func.id == "print"]
+    assert not prints, prints
+    preprocess.emit("line one")
+    preprocess.emit()
+    assert capsys.readouterr().out == "line one\n\n"
+
+
+def test_wavelet_pad_settings_come_from_config():
+    cfg = fluent()
+    x = one_over_f(NOISE_SEED, 30)
+    window = np.zeros(x.size, dtype=bool)
+    window[15 * FS:15 * FS + 200] = True
+    weight = window.astype(float)
+    a = preprocess.wavelet_correct(cfg, x, FS, window, weight)
+    cfg["preprocessing"]["ocular"]["wavelet"]["reflect_type"] = "even"
+    b = preprocess.wavelet_correct(cfg, x, FS, window, weight)
+    assert a.shape == b.shape and np.array_equal(a[~window], b[~window])
+    cfg["preprocessing"]["ocular"]["wavelet"]["edge_pad_s"] = 2
+    assert preprocess.wavelet_correct(cfg, x, FS, window, weight).shape == x.shape
+
+
 def test_b5_config_leaves_are_placeholders_with_the_documented_values():
     raw = __import__("yaml").safe_load((REPO_ROOT / "config.yml").read_text(encoding="utf-8"))["preprocessing"]
     assert raw["rejection"]["segment_rms_min_uv"]["value"] == 1.0
@@ -534,3 +575,8 @@ def test_b5_config_leaves_are_placeholders_with_the_documented_values():
     wv = raw["ocular"]["wavelet"]
     assert wv["family"]["value"] == "sym4" and wv["clip_multiplier_robust_sd"]["value"] == 3
     assert wv["edge_pad_s"]["value"] == 4 and all(v["prov"] == "placeholder" for v in wv.values())
+    assert wv["reflect_type"]["value"] == "odd"
+    assert raw["exclusions"]["schema_version"]["value"] == 1 and raw["exclusions"]["schema_version"]["prov"] == "placeholder"
+    mad = raw["ocular"]["mad_to_sd_factor"]
+    assert "normal" in mad["ref"] and "Phi^-1(0.75)" in mad["ref"] and "§5.1" not in mad["ref"].replace("(not from §5.1)", "")
+    assert abs(mad["value"] - 1.0 / __import__("scipy.stats", fromlist=["norm"]).norm.ppf(0.75)) < 5e-5

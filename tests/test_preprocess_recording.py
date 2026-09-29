@@ -608,6 +608,40 @@ def test_cache_invalidated_by_file_hash_and_variant(rec, tmp_path, count_loads):
     assert len(count_loads) == 3
 
 
+def test_bipolar_notched_matches_bipolar_and_survives_the_cache_round_trip(rec, tmp_path, count_loads):
+    cache = tmp_path / "cache"
+    first = run(rec, cache_root=cache)
+    second = run(rec, cache_root=cache)                          # read back from the .npz
+    assert len(count_loads) == 1 and len(list(cache.rglob("*.npz"))) == 1
+    trim = int(round(PP["edge_trim_s"] * FS))
+    for res in (first, second):
+        assert res.bipolar_notched is not None and res.bipolar_notched.dtype == np.float64
+        assert res.bipolar_notched.shape == res.bipolar.shape == (2, N_SAMPLES - 2 * trim)
+        assert res.meta["n_samples_after_trim"] == N_SAMPLES - 2 * trim
+    assert np.array_equal(first.bipolar_notched, second.bipolar_notched)
+    assert np.array_equal(first.bipolar, second.bipolar)
+    assert not np.array_equal(first.bipolar_notched, first.bipolar)      # notched only, not band-passed
+    # expected: notch, trim, difference of the two electrodes of each pair (independent of the band-pass)
+    edf, man, root, pilots = rec
+    raw = preprocess.load_recording(CFG, edf, root, man, pilots)
+    el = {n: preprocess.trim_edges(preprocess.notch(CFG, raw.data_uv[raw.ch_names.index(n)], FS), FS, PP["edge_trim_s"])
+          for n in ("P3", "PO3", "P4", "PO4")}
+    expected = np.stack([el["P3"] - el["PO3"], el["P4"] - el["PO4"]])
+    assert np.array_equal(first.bipolar_notched, expected)
+
+
+def test_b4_cache_invalidated_when_the_source_changes(rec, tmp_path, count_loads, monkeypatch):
+    cache = tmp_path / "cache"
+    run(rec, cache_root=cache)
+    run(rec, cache_root=cache)
+    assert len(count_loads) == 1
+    src = tmp_path / "preprocess_changed.py"
+    src.write_text(Path(preprocess.__file__).read_text(encoding="utf-8") + "\n# one changed line\n", encoding="utf-8")
+    monkeypatch.setattr(preprocess, "_SOURCE", src)
+    run(rec, cache_root=cache)
+    assert len(count_loads) == 2 and len(list(cache.rglob("*.npz"))) == 2
+
+
 def test_cache_keys_differ_with_inputs():
     k = preprocess.cache_key(CFG, "a" * 64, False, False)
     assert k == preprocess.cache_key(CFG, "a" * 64, False, False)

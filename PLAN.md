@@ -131,7 +131,9 @@ Done when:
 
 Note (2026-09-29): done, with one item deferred: bandpass_impulse_response exists (A3), but saving it under outputs/ happens when phase 1 is wired, which has not been done. Verified by the pilot report and the noise-like edge report over ten seeds (0.5 Hz, trim 5.0 s: worst deviation after trim 0.13% of SD) and twenty seeds (0.1 Hz, trim 25.0 s: 0.20%), IMP-010, commit 146c21f. The electrode RMS lower bound was changed from 5 to 1 uV by DEV-001 (hash in DEVIATIONS.md); the bounds are now 1-150 uV. Bad electrodes are only flagged here; exclusion is B6 (§12). A print-only 1-s bipolar segment RMS diagnostic for B5 was added (IMP-011).
 
-### [ ] B5. Channel pipeline, part 2
+Note (2026-09-29, cleanup): Phase-1 wiring still to do: the 5% halt that raises or stops, calling write_exclusions, per-variant exclusion file naming, config_sha256 and manifest_summary extraction, saving the band-pass impulse response for 0.5 and 0.1 Hz under outputs/, and restricting allow_all to the phase-1 runner with a test. The lower electrode RMS bound is 1 uV (DEV-001); the 5 uV in the bullet above is superseded (see IMP-013).
+
+### [x] B5. Channel pipeline, part 2
 Read: §5.1 steps 7–10, §10.2.
 Done when:
 - Blinks are detected (0.5–5 Hz copy above 6 robust SD) and corrected with the wavelet method, ±0.25 s around each.
@@ -144,12 +146,16 @@ Done when:
 - Rescaling to μ_ref and σ_ref uses clean samples only.
 - The pipeline runs on 2 pilot subjects, with per-subject caching and a per-step log.
 
-### [ ] B6. Exclusions
+Note (2026-09-29): done. `python -m src.preprocess --segment-report` on all 12 pilot subjects (16 recordings): 0 of 16 units-check failures; blinks corrected in 8 of 16 recordings (largest corrected fraction 0.0474 of the trimmed recording); the rescaled clean samples equal mu_ref and sigma_ref (ddof 1) for every kept recording. Design and choices in IMP-012, code commit fb651ed; cleanup after the independent review in IMP-013 (wavelet window measured and kept, housekeeping, code hash in the cache keys). Wavelet blink correction is only a safeguard against large blinks: at 30 uV the 6 robust SD detector misses most blinks on 1/f (IMP-012). Phase-1 wiring still to do: the 5% halt that raises or stops, calling write_exclusions, per-variant exclusion file naming, config_sha256 and manifest_summary extraction, saving the band-pass impulse response for 0.5 and 0.1 Hz under outputs/, and restricting allow_all to the phase-1 runner with a test.
+
+### [x] B6. Exclusions
 Read: §12.
 Done when:
 - All rules are applied by code, and each exclusion is judged per recording.
 - An exclusion log is written.
 - The split is never redrawn.
+
+Note (2026-09-29): done. Rules applied per recording in this order: units check, bad electrode, excessive blink correction (new, IMP-013: corrected time of either channel above 10% of the trimmed recording), clean data below 60 s. Pilot result: sub-051 ses-t2 excluded for insufficient clean data (20.0 s); no other pilot recording excluded; the corrected-time guard excludes none of the 16 (subject sub-051 stays in C1, out of C3). The exclusion structure and file writer exist (`apply_exclusions`, `write_exclusions`, tested with tmp_path) but nothing writes outputs/exclusions.json yet. Phase-1 wiring still to do: the 5% halt that raises or stops, calling write_exclusions, per-variant exclusion file naming, config_sha256 and manifest_summary extraction, saving the band-pass impulse response for 0.5 and 0.1 Hz under outputs/, and restricting allow_all to the phase-1 runner with a test.
 
 ---
 

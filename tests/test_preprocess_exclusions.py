@@ -3,6 +3,7 @@ exclusion file (§12, §11.1; IMP-012). Pure functions over hand-made results; n
 and nothing is written under the real outputs/.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,9 @@ from src.config import load_config
 CFG = load_config()
 S1, S2 = CFG["dataset"]["session_first"], CFG["dataset"]["session_second"]
 MIN_CLEAN_S = 60.0     # §12 placeholder minimum, written out here on purpose (independent of config)
+MAX_CORRECTED = 0.10   # IMP-013 placeholder: largest allowed corrected fraction of the trimmed recording
+TRIMMED_S = 100.0      # hand-made trimmed recording length: the limit is then exactly 10.0 s
+STEP_S = 1 / 1024      # one sample at 1024 Hz; corrected times are multiples of it
 
 
 def meta(subject="sub-001", session=S1, units_ok=True, bad=(), sd=5.0):
@@ -20,8 +24,9 @@ def meta(subject="sub-001", session=S1, units_ok=True, bad=(), sd=5.0):
             "electrodes": {n: {"flags": ["rms_above_max"]} for n in bad}}
 
 
-def b5(clean_s):
-    return {"b5": {"log": {"clean_s": clean_s}}}
+def b5(clean_s, corrected=(0.0, 0.0), trimmed_s=TRIMMED_S):
+    return {"b5": {"log": {"clean_s": clean_s, "trimmed_s": trimmed_s,
+                           "blinks": [{"corrected_s": c} for c in corrected]}}}
 
 
 def kept():
@@ -64,6 +69,75 @@ def test_clean_data_rule_needs_b5_results():
         preprocess.recording_decision(CFG, meta(), None)
     with pytest.raises(preprocess.PreprocessError, match="B5"):
         preprocess.recording_decision(CFG, meta(), {"b5": None})
+
+
+# ---------------------------------------------------------------- corrected-time guard (IMP-013)
+
+def test_corrected_time_exactly_at_the_fraction_is_kept_and_just_above_is_excluded():
+    limit_s = MAX_CORRECTED * TRIMMED_S                                  # 10.0 s
+    at = preprocess.recording_decision(CFG, meta(), b5(200.0, (limit_s, 0.0)))
+    assert at["status"] == "kept" and at["reason"] is None
+    above = preprocess.recording_decision(CFG, meta(), b5(200.0, (limit_s + STEP_S, 0.0)))
+    assert above["status"] == "excluded" and above["reason"] == "excessive_blink_correction"
+    assert above["detail"]["maximum_fraction"] == MAX_CORRECTED
+    assert above["detail"]["corrected_fraction"] == pytest.approx([(limit_s + STEP_S) / TRIMMED_S, 0.0])
+    assert above["clean_s"] == 200.0
+
+
+def test_corrected_time_boundary_in_samples_for_a_non_round_recording_length():
+    trimmed_s = 282112 * STEP_S                                          # 275.5 s; limit 27.55 s = 28211.2 samples
+    ok = preprocess.recording_decision(CFG, meta(), b5(200.0, (28211 * STEP_S, 0.0), trimmed_s))
+    bad = preprocess.recording_decision(CFG, meta(), b5(200.0, (28212 * STEP_S, 0.0), trimmed_s))
+    assert ok["status"] == "kept" and bad["reason"] == "excessive_blink_correction"
+
+
+def test_either_channel_over_the_fraction_excludes():
+    over = MAX_CORRECTED * TRIMMED_S + 1.0
+    for corrected in ((over, 0.0), (0.0, over), (over, over)):
+        assert preprocess.recording_decision(CFG, meta(), b5(200.0, corrected))["reason"] == "excessive_blink_correction"
+    assert preprocess.recording_decision(CFG, meta(), b5(200.0, (9.0, 9.0)))["status"] == "kept"
+
+
+def test_blink_guard_comes_after_bad_electrode_and_before_clean_data_minimum():
+    over = MAX_CORRECTED * TRIMMED_S + 1.0
+    assert preprocess.recording_decision(CFG, meta(bad=["P3"]), None)["reason"] == "bad_electrode"
+    assert preprocess.recording_decision(CFG, meta(units_ok=False), b5(200.0, (over, over)))["reason"] == "units_check"
+    both = preprocess.recording_decision(CFG, meta(), b5(10.0, (over, over)))          # also below the clean-data minimum
+    assert both["reason"] == "excessive_blink_correction"
+    assert preprocess.recording_decision(CFG, meta(), b5(10.0, (1.0, 1.0)))["reason"] == "insufficient_clean_data"
+
+
+def test_blink_guard_subject_consequences_are_those_of_the_other_recording_rules():
+    over = MAX_CORRECTED * TRIMMED_S + 1.0
+    bad = preprocess.recording_decision(CFG, meta(), b5(200.0, (over, 0.0)))
+    good = preprocess.recording_decision(CFG, meta(), b5(200.0))
+    s = status(good, bad)                                                # t2-only failure
+    assert s["in_c1"] and not s["in_c3"] and s["t2"] == {"status": "excluded", "reason": "excessive_blink_correction"}
+    s = status(bad, good)                                                # t1 failure: t2 unused
+    assert not s["in_c1"] and not s["in_c3"]
+    assert s["t1"]["reason"] == "excessive_blink_correction"
+    assert s["t2"] == {"status": "excluded", "reason": "t1_excluded_t2_unused"}
+    s = status(bad, None)
+    assert not s["in_c1"] and not s["in_c3"] and s["t2"] is None
+
+
+def test_blink_guard_is_logged(caplog):
+    with caplog.at_level("WARNING", logger="pipeline.preprocess"):
+        preprocess.recording_decision(CFG, meta(), b5(200.0, (50.0, 0.0)))
+    assert len(caplog.records) == 1
+    assert "excessive_blink_correction" in caplog.records[0].getMessage()
+    assert "sub-001/ses-t1" in caplog.records[0].getMessage()
+
+
+def test_corrected_fractions_helper():
+    assert preprocess.corrected_fractions(b5(1.0, (5.0, 20.0))["b5"]["log"]) == [0.05, 0.2]
+
+
+def test_blink_guard_config_leaf_is_a_placeholder_of_ten_percent():
+    raw = __import__("yaml").safe_load((Path(__file__).resolve().parent.parent / "config.yml").read_text(encoding="utf-8"))
+    leaf = raw["preprocessing"]["ocular"]["max_corrected_fraction"]
+    assert leaf["value"] == MAX_CORRECTED and leaf["prov"] == "placeholder"
+    assert CFG["preprocessing"]["ocular"]["max_corrected_fraction"] == MAX_CORRECTED
 
 
 def test_every_exclusion_is_logged(caplog):
@@ -140,7 +214,7 @@ def test_apply_exclusions_structure_and_counts():
     dec[("sub-100", S1)] = excluded("bad_electrode")
     dec[("sub-101", S2)] = excluded("insufficient_clean_data")
     out = preprocess.apply_exclusions(CFG, dec)
-    assert out["schema"] == 1 and len(out["recordings"]) == 153
+    assert out["schema"] == 1 == CFG["preprocessing"]["exclusions"]["schema_version"] and len(out["recordings"]) == 153
     assert out["recordings"]["sub-100/ses-t1"]["reason"] == "bad_electrode"
     assert out["subjects"]["sub-100"]["in_c1"] is False
     assert out["subjects"]["sub-101"]["in_c1"] is True and out["subjects"]["sub-101"]["in_c3"] is False

@@ -34,6 +34,19 @@ from src.config import REPO_ROOT, load_config
 
 logger = logging.getLogger("pipeline.preprocess")
 
+_SOURCE = Path(__file__).resolve()
+
+
+def emit(text=""):
+    """The one place report text is written to stdout (development reports); everything else logs."""
+    sys.stdout.write(text + "\n")
+
+
+def code_hash():
+    """SHA-256 of the source text of this module; part of the B4 and B5 cache keys, so that a change to
+    the code invalidates cached results (IMP-013)."""
+    return hashlib.sha256(_SOURCE.read_bytes()).hexdigest()
+
 
 class PreprocessError(ValueError):
     """Raised for an input or configuration the filter functions cannot handle."""
@@ -472,7 +485,7 @@ def _fingerprint(cfg):
 
 
 def cache_key(cfg, sha256, sensitivity_highpass, strict):
-    payload = "\n".join([sha256, _fingerprint(cfg), str(bool(sensitivity_highpass)), str(bool(strict))])
+    payload = "\n".join([sha256, code_hash(), _fingerprint(cfg), str(bool(sensitivity_highpass)), str(bool(strict))])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -618,7 +631,8 @@ def wavelet_correct(cfg, x, fs_hz, window, weight, diagnostics=None):
 
     At each altered level j the coefficients inside `window` extended on both sides by that level's
     filter half-support are clipped to +/- clip_multiplier times the robust SD of that level over the
-    whole channel. The inverse transform c is spliced in as
+    whole channel. The pad is ceil(edge_pad_s * fs) samples on both ends plus a tail on the right that
+    makes the padded length a multiple of 2**level. The inverse transform c is spliced in as
     x + weight * (c - x) inside `window`; samples outside it are returned unchanged (bit-identical).
     """
     import pywt  # lazy: only blink correction needs it
@@ -633,7 +647,7 @@ def wavelet_correct(cfg, x, fs_hz, window, weight, diagnostics=None):
         raise PreprocessError(f"wavelet_correct: {n} samples is not more than the edge pad ({pad})")
     block = 2 ** level
     tail = -(-(n + 2 * pad) // block) * block - (n + 2 * pad)
-    xp = np.pad(x, (pad, pad + tail), mode="reflect", reflect_type="odd")
+    xp = np.pad(x, (pad, pad + tail), mode="reflect", reflect_type=wv["reflect_type"])
     mp = np.pad(window, (pad, pad + tail), constant_values=False)
     dist = distance_transform_edt(~mp)
     coeffs = pywt.swt(xp, wv["family"], level=level, trim_approx=True)   # [cA_L, cD_L, ..., cD_1]
@@ -729,11 +743,6 @@ def clean_runs(keep, min_len):
     return [(int(a), int(b)) for a, b in zip(starts, ends) if b - a >= min_len]
 
 
-def observation_mask(rejected, seg_out):
-    """The 1-s segment mask at the observation rate: segment k covers samples [k * seg_out, (k + 1) * seg_out)."""
-    return np.repeat(np.asarray(rejected, dtype=bool), seg_out)
-
-
 # ---------------------------------------------------------------- B5: rescaling, vigilance (§5.1, IMP-006, IMP-012)
 
 def rescale(cfg, segments):
@@ -797,7 +806,8 @@ def _fingerprint_b5(cfg):
 
 
 def cache_key_b5(cfg, sha256, sensitivity_highpass, strict):
-    payload = "\n".join(["b5", sha256, _fingerprint_b5(cfg), str(bool(sensitivity_highpass)), str(bool(strict))])
+    payload = "\n".join(["b5", sha256, code_hash(), _fingerprint_b5(cfg), str(bool(sensitivity_highpass)),
+                         str(bool(strict))])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -836,6 +846,7 @@ def segment_signal(cfg, x_bp, x_notched, fs_hz, strict=False):
     if n_seg == 0:
         raise PreprocessError("segment_signal: less than one whole 1-s segment")
     n_use = n_seg * seg_in
+    trimmed_s = float(x_bp.shape[-1] / fs_hz)
     tail_s = float((x_bp.shape[-1] - n_use) / fs_hz)
     x_bp, x_notched = x_bp[:, :n_use], x_notched[:, :n_use]
     corrected, blink_log = correct_blinks(cfg, x_bp, fs_hz)
@@ -850,7 +861,7 @@ def segment_signal(cfg, x_bp, x_notched, fs_hz, strict=False):
     starts = [a for a, _ in runs]
     n_keep = int(np.count_nonzero(~padded))
     n_clean = sum(b - a for a, b in runs)
-    log = {"n_segments": int(n_seg), "cropped_tail_s": tail_s,
+    log = {"n_segments": int(n_seg), "trimmed_s": trimmed_s, "cropped_tail_s": tail_s,
            "rules": {k: {"n_segments": int(v.any(axis=0).sum()), "seconds": float(v.any(axis=0).sum() * seg_s),
                          "per_channel": [int(r.sum()) for r in v]} for k, v in flags.items()},
            "rejected_segments": int(rejected.sum()), "rejected_before_padding_s": float(rejected.sum() * seg_s),
@@ -898,9 +909,22 @@ def segment_recording(cfg, edf_path, data_root, manifest, pilot_ids, *, allow_al
 
 # ---------------------------------------------------------------- B6: exclusions (§12, IMP-012)
 
+def corrected_fractions(log):
+    """Corrected blink time of each bipolar channel as a fraction of the edge-trimmed recording (B5 log)."""
+    return [b["corrected_s"] / log["trimmed_s"] for b in log["blinks"]]
+
+
+def blink_correction_excessive(cfg, log):
+    """True if the corrected time of EITHER channel is strictly more than max_corrected_fraction of the
+    edge-trimmed recording (exact arithmetic on the stored seconds; equal is not excessive)."""
+    limit = Fraction(repr(cfg["preprocessing"]["ocular"]["max_corrected_fraction"])) * Fraction(log["trimmed_s"])
+    return any(Fraction(b["corrected_s"]) > limit for b in log["blinks"])
+
+
 def recording_decision(cfg, meta, seg_meta=None):
-    """Kept or excluded for ONE recording, in the §12 order: units check, bad electrode, clean data below
-    min_clean_data_per_recording_s (from B5). Returns the FIRST failing rule; every exclusion is logged."""
+    """Kept or excluded for ONE recording, in the §12 order: units check, bad electrode, excessive blink
+    correction (IMP-013), clean data below min_clean_data_per_recording_s (from B5). Returns the FIRST
+    failing rule; every exclusion is logged."""
     rel = meta["rel_path"]
     minimum = cfg["preprocessing"]["min_clean_data_per_recording_s"]
     clean_s = None
@@ -914,7 +938,11 @@ def recording_decision(cfg, meta, seg_meta=None):
         if b5 is None:
             raise PreprocessError(f"{rel}: B5 results are needed to judge the clean-data minimum")
         clean_s = b5["log"]["clean_s"]
-        if clean_s < minimum:
+        if blink_correction_excessive(cfg, b5["log"]):
+            d = {"status": "excluded", "reason": "excessive_blink_correction",
+                 "detail": {"corrected_fraction": corrected_fractions(b5["log"]),
+                            "maximum_fraction": cfg["preprocessing"]["ocular"]["max_corrected_fraction"]}}
+        elif clean_s < minimum:
             d = {"status": "excluded", "reason": "insufficient_clean_data",
                  "detail": {"clean_s": clean_s, "minimum_s": minimum}}
         else:
@@ -952,7 +980,7 @@ def apply_exclusions(cfg, decisions):
     n_failed = sum(d["reason"] == "units_check" for d in decisions.values())
     halt = units_check_halt(cfg, n_failed, len(decisions))
     recs = {f"{s}/{ses}": d for (s, ses), d in sorted(decisions.items())}
-    return {"schema": 1,
+    return {"schema": cfg["preprocessing"]["exclusions"]["schema_version"],
             "units_check_halt": {"n_failed": halt.n_failed, "n_total": halt.n_total,
                                  "fraction": halt.fraction, "halt": halt.halt},
             "recordings": recs, "subjects": subject_status(cfg, decisions)}
@@ -1081,10 +1109,10 @@ def recording_electrode_diagnostics(cfg, rec):
 
 
 def print_electrode_diagnostics(d):
-    print(f"    all channels' RMS (uV): median {d['rms_median']:.3f}, min {d['rms_min']:.3f}, "
+    emit(f"    all channels' RMS (uV): median {d['rms_median']:.3f}, min {d['rms_min']:.3f}, "
           f"max {d['rms_max']:.3f} | channels below the RMS floor: {d['n_below_floor']} of {d['n_channels']}")
     for name, e in d["electrodes"].items():
-        print(f"      {name:>4}: RMS {e['rms_uv']:8.3f} uV = {e['rms_over_median']:.3f} x median | "
+        emit(f"      {name:>4}: RMS {e['rms_uv']:8.3f} uV = {e['rms_over_median']:.3f} x median | "
               f"rank {e['rank']:>2} of {d['n_channels']} (1 = lowest) | alpha peak {e['alpha_peak_hz']:6.3f} Hz | "
               f"relative alpha {e['relative_alpha']:.4f} | below floor: {'YES' if e['below_floor'] else 'no'}")
 
@@ -1140,18 +1168,18 @@ def print_bipolar_segment_report(cfg, names, rows, n_files):
     ed = cfg["preprocessing"]["electrode_diagnostics"]
     pcts = ed["segment_rms_percentiles"]
     lo, ref, hi = rows[0]["lo"], rows[0]["ref"], rows[0]["hi"]
-    print(f"\n[bipolar 1-s segment RMS] pilot subjects, {n_files} recordings, after the pipeline's notch, band-pass "
+    emit(f"\n[bipolar 1-s segment RMS] pilot subjects, {n_files} recordings, after the pipeline's notch, band-pass "
           f"and edge trim; print-only, no rejection applied")
-    print(f"  {'recording':<16} {'channel':<8} {'n seg':>5} " + " ".join(f"{'p' + str(p):>8}" for p in pcts)
+    emit(f"  {'recording':<16} {'channel':<8} {'n seg':>5} " + " ".join(f"{'p' + str(p):>8}" for p in pcts)
           + f" {'<' + str(lo) + ' uV':>9} {'<' + str(ref) + ' uV':>9} {'>' + str(hi) + ' uV':>9}")
     for r in rows:
-        print(f"  {r['subject'] + ' ' + r['session']:<16} {r['channel']:<8} {r['n_segments']:>5} "
+        emit(f"  {r['subject'] + ' ' + r['session']:<16} {r['channel']:<8} {r['n_segments']:>5} "
               + " ".join(f"{r['percentiles'][p]:>8.3f}" for p in pcts)
               + f" {r['frac_below_lo']:>9.4f} {r['frac_below_ref']:>9.4f} {r['frac_above_hi']:>9.4f}")
     for name in names:
         meds = [r["median"] for r in rows if r["channel"] == name]
-        print(f"  median over {len(meds)} recordings of the median segment RMS, {name}: {float(np.median(meds)):.3f} uV")
-    print(f"  median over all {len(rows)} recording-channel medians: "
+        emit(f"  median over {len(meds)} recordings of the median segment RMS, {name}: {float(np.median(meds)):.3f} uV")
+    emit(f"  median over all {len(rows)} recording-channel medians: "
           f"{float(np.median([r['median'] for r in rows])):.3f} uV")
 
 
@@ -1166,20 +1194,20 @@ def pilot_recordings(cfg, root, pilot_ids):
 def print_edge_report(cfg, variants):
     er = cfg["preprocessing"]["edge_report"]
     limit = er["max_deviation_fraction_of_sd"]
-    print(f"\n[edge transient] 1/f noise + {er['sine_hz']} Hz sine, base seed {er['seed']} "
+    emit(f"\n[edge transient] 1/f noise + {er['sine_hz']} Hz sine, base seed {er['seed']} "
           f"(0.5 Hz variant {er['n_seeds']} seeds, 0.1 Hz variant {er['n_seeds_slow']} seeds), "
           f"{cfg['dataset']['recording_length_s']} s at "
           f"{cfg['dataset']['native_fs_hz']} Hz; deviation from the transient-free reference as a fraction of "
           f"the filtered signal SD (limit {limit})")
     for v in variants:
-        print(f"\n  high-pass {v['highpass_hz']} Hz, edge trim {v['edge_trim_s']} s: "
+        emit(f"\n  high-pass {v['highpass_hz']} Hz, edge trim {v['edge_trim_s']} s: "
               f"worst deviation after trim {v['worst_trimmed_max_frac']:.6f} | worst seconds above the limit: "
               f"start {v['worst_seconds_above_limit_start']:.3f}, end {v['worst_seconds_above_limit_end']:.3f} | "
               f"{'STOP' if v['exceeds'] else 'ok'}")
-        print(f"  {'seed':>10} {'sig SD':>8} {'max dev, no trim':>17} {'s>lim start':>12} {'s>lim end':>10} "
+        emit(f"  {'seed':>10} {'sig SD':>8} {'max dev, no trim':>17} {'s>lim start':>12} {'s>lim end':>10} "
               f"{'max dev after trim':>19} {'verdict':>8}")
         for r in v["per_seed"]:
-            print(f"  {r['seed']:>10} {r['signal_sd']:>8.4f} {r['untrimmed_max_frac']:>17.5f} "
+            emit(f"  {r['seed']:>10} {r['signal_sd']:>8.4f} {r['untrimmed_max_frac']:>17.5f} "
                   f"{r['seconds_above_limit_start']:>12.3f} {r['seconds_above_limit_end']:>10.3f} "
                   f"{r['trimmed_max_frac']:>19.6f} {'STOP' if r['exceeds'] else 'ok':>8}")
 
@@ -1193,7 +1221,7 @@ def flag_summary(flagged_recordings, flagged_subjects, n_recordings, n_subjects)
 
 
 def print_flag_summary(s):
-    print(f"\n[current rule] recordings with at least one bad electrode: {s['recordings']} of {s['n_recordings']} "
+    emit(f"\n[current rule] recordings with at least one bad electrode: {s['recordings']} of {s['n_recordings']} "
           f"({s['recording_fraction']:.3f}); subjects with at least one such recording: "
           f"{s['subjects']} of {s['n_subjects']} ({s['subject_fraction']:.3f})")
 
@@ -1208,7 +1236,7 @@ def pilot_report(cfg, root, electrode_diag=False):
     cache_root = Path(root) / cfg["paths"]["cache_dir"]
     data_root = Path(root) / cfg["paths"]["data_dir"]
     files = pilot_recordings(cfg, root, pilot_ids)
-    print(f"[pilot report] {len(pilot_ids)} pilot subjects, {len(files)} recordings, "
+    emit(f"[pilot report] {len(pilot_ids)} pilot subjects, {len(files)} recordings, "
           f"units check high-pass {cfg['preprocessing']['units_check']['highpass_hz']} Hz, "
           f"edge trim {cfg['preprocessing']['edge_trim_s']} s")
     n_fail = 0
@@ -1217,29 +1245,29 @@ def pilot_report(cfg, root, electrode_diag=False):
         res = preprocess_recording(cfg, f, data_root, manifest, pilot_ids, cache_root=cache_root)
         m = res.meta
         n_fail += not m["units_passed"]
-        print(f"\n{m['subject']} {m['session']}: SHA-256 {'OK' if m['sha256_ok'] else 'FAIL'} ({m['sha256']}) | "
+        emit(f"\n{m['subject']} {m['session']}: SHA-256 {'OK' if m['sha256_ok'] else 'FAIL'} ({m['sha256']}) | "
               f"median SD after 0.5 Hz high-pass {m['units_median_sd_uv']:.3f} uV | "
               f"units check {'PASS' if m['units_passed'] else 'FAIL'} | samples after trim {m['n_samples_after_trim']}")
         for name, e in m["electrodes"].items():
             flag = ", ".join(e["flags"]) if e["flags"] else "-"
-            print(f"    {name:>4}: band-passed RMS {e['rms_uv']:8.3f} uV | longest raw run at own max/min "
+            emit(f"    {name:>4}: band-passed RMS {e['rms_uv']:8.3f} uV | longest raw run at own max/min "
                   f"{e['saturation_run']:>3} samples (limit {e['saturation_limit']}) | "
                   f"flat 1-s segments {e['flat_segments']} | bad-electrode flag: {flag}")
         if m["bad_electrodes"]:
-            print(f"    BAD ELECTRODES: {', '.join(m['bad_electrodes'])}")
+            emit(f"    BAD ELECTRODES: {', '.join(m['bad_electrodes'])}")
             flagged_recordings += 1
             flagged_subjects.add(m["subject"])
         if electrode_diag and m["units_passed"]:
             rec = load_recording(cfg, f, data_root, manifest, pilot_ids, known_sha256=m["sha256"])
             print_electrode_diagnostics(recording_electrode_diagnostics(cfg, rec))
     halt = units_check_halt(cfg, n_fail, len(files))
-    print(f"\n[units check] {halt.n_failed} of {halt.n_total} failed ({halt.fraction:.4f}); "
+    emit(f"\n[units check] {halt.n_failed} of {halt.n_total} failed ({halt.fraction:.4f}); "
           f"halt: {'YES' if halt.halt else 'no'}")
     print_flag_summary(flag_summary(flagged_recordings, flagged_subjects, len(files), len(pilot_ids)))
     variants = edge_transient_report(cfg)
     print_edge_report(cfg, variants)
     if any(v["exceeds"] for v in variants):
-        print("\nSTOP: the deviation after the trim exceeds the limit for at least one variant and seed; "
+        emit("\nSTOP: the deviation after the trim exceeds the limit for at least one variant and seed; "
               "the edge trims are too short. Nothing was changed.")
         return 1
     return 0
@@ -1255,7 +1283,7 @@ def segment_report(cfg, root):
     pp = cfg["preprocessing"]
     thr, mu_ref, sigma_ref = pp["ocular"]["detect_threshold_robust_sd"], cfg["rescaling"]["mu_ref"], cfg["rescaling"]["sigma_ref"]
     chan = [f"{pp['channels'][s][0]}-{pp['channels'][s][1]}" for s in ("left_pair", "right_pair")]
-    print(f"[segment report] {len(pilot_ids)} pilot subjects, {len(files)} recordings; B5 then B6 (IMP-012); "
+    emit(f"[segment report] {len(pilot_ids)} pilot subjects, {len(files)} recordings; B5 then B6 (IMP-012); "
           f"mu_ref {mu_ref}, sigma_ref {sigma_ref}; print-only")
     decisions = {}
     for f in files:
@@ -1264,28 +1292,35 @@ def segment_report(cfg, root):
         m = res.meta
         dec = recording_decision(cfg, m, res.meta)
         decisions[(m["subject"], m["session"])] = dec
-        mark = "  <<<< sub-051 ses-t2" if (m["subject"], m["session"]) == ("sub-051", cfg["dataset"]["session_second"]) else ""
-        print(f"\n{m['subject']} {m['session']}: B6 decision {dec['status'].upper()}"
-              + (f" ({dec['reason']}: {dec['detail']})" if dec["reason"] else "") + mark)
+        fracs = None if m["b5"] is None else corrected_fractions(m["b5"]["log"])
+        marks = []
+        if dec["status"] == "excluded":
+            marks.append("excluded")
+        if fracs is not None and max(fracs) > pp["ocular"]["report_corrected_fraction"]:
+            marks.append(f"corrected fraction above {pp['ocular']['report_corrected_fraction']:.0%}")
+        mark = f"  <<<< {'; '.join(marks)}" if marks else ""
+        emit(f"\n{m['subject']} {m['session']}: B6 decision {dec['status'].upper()}"
+             + (f" ({dec['reason']}: {dec['detail']})" if dec["reason"] else "") + mark)
         if m["b5"] is None:
-            print("    B5 not run (excluded before segmentation)")
+            emit("    B5 not run (excluded before segmentation)")
             continue
         b5, lg = m["b5"], m["b5"]["log"]
         n_use = lg["n_segments"] * int(round(pp["rejection"]["segment_length_s"] * m["fs_hz"]))
         for i, name in enumerate(chan):
             exc = blink_excursion(cfg, b4.bipolar[i][:n_use], m["fs_hz"])
             bl = lg["blinks"][i]
-            print(f"    {name:>7}: blinks detected {bl['n_windows']}, corrected {bl['n_windows']} "
-                  f"({bl['corrected_s']:.2f} s, {bl['n_flagged_samples']} flagged samples) | largest excursion of the "
+            emit(f"    {name:>7}: blinks detected {bl['n_windows']}, corrected {bl['n_windows']} "
+                  f"({bl['corrected_s']:.2f} s = {fracs[i]:.4f} of the {lg['trimmed_s']:.1f} s trimmed recording, "
+                  f"limit {pp['ocular']['max_corrected_fraction']}; {bl['n_flagged_samples']} flagged samples) | largest excursion of the "
                   f"{pp['ocular']['detect_band_hz'][0]}-{pp['ocular']['detect_band_hz'][1]} Hz copy {exc:.2f} robust SD "
                   f"(threshold {thr})")
         r = lg["rules"]
-        print(f"    segments of {lg['n_segments']} rejected {lg['rejected_segments']} (either channel): "
+        emit(f"    segments of {lg['n_segments']} rejected {lg['rejected_segments']} (either channel): "
               f"RMS low {r['rms_low']['n_segments']}, RMS high {r['rms_high']['n_segments']}, "
               f"flat-line {r['flat']['n_segments']}, EMG {r['emg']['n_segments']} | per channel (ch0/ch1): "
               f"RMS low {r['rms_low']['per_channel']}, RMS high {r['rms_high']['per_channel']}, "
               f"flat {r['flat']['per_channel']}, EMG {r['emg']['per_channel']}")
-        print(f"    seconds rejected: before padding {lg['rejected_before_padding_s']:.1f}, after padding "
+        emit(f"    seconds rejected: before padding {lg['rejected_before_padding_s']:.1f}, after padding "
               f"{lg['rejected_after_padding_s']:.1f}; dropped short stretches {lg['dropped_short_stretch_s']:.2f}; "
               f"clean {lg['clean_s']:.2f} s in {lg['n_clean_segments']} segments (cropped tail {lg['cropped_tail_s']:.3f} s)")
         if res.segments:
@@ -1293,22 +1328,23 @@ def segment_report(cfg, root):
             ddof = pp["rescale"]["ddof"]
             bf = b5["clean_stats_before"]
             for i, name in enumerate(chan):
-                print(f"    {name:>7}: clean-sample mean/SD before rescaling {bf['mean'][i]:.6f} / {bf['sd'][i]:.6f} | "
+                emit(f"    {name:>7}: clean-sample mean/SD before rescaling {bf['mean'][i]:.6f} / {bf['sd'][i]:.6f} | "
                       f"after {allx[i].mean():.12f} / {allx[i].std(ddof=ddof):.12f} (must be {mu_ref} / {sigma_ref})")
             v = b5["vigilance"]
-            print(f"    vigilance alpha/theta over {len(v['epoch_starts'])} epochs: mean "
+            emit(f"    vigilance alpha/theta over {len(v['epoch_starts'])} epochs: mean "
                   + ", ".join(f"{name} {mv:.3f}" for name, mv in zip(chan, v["mean"])))
     struct = apply_exclusions(cfg, decisions)
     h = struct["units_check_halt"]
-    print(f"\n[units check] {h['n_failed']} of {h['n_total']} failed (fraction {h['fraction']:.4f}); halt: "
+    emit(f"\n[units check] {h['n_failed']} of {h['n_total']} failed (fraction {h['fraction']:.4f}); halt: "
           f"{'YES' if h['halt'] else 'no'} -- not meaningful with n={h['n_total']} "
           f"(one failure would be {1 / h['n_total']:.2%})")
-    print("\n[subjects] session status and derived flags")
+    emit("\n[subjects] session status and derived flags")
     for subj, st in struct["subjects"].items():
         t2 = "none" if st["t2"] is None else f"{st['t2']['status']}" + (f" ({st['t2']['reason']})" if st["t2"]["reason"] else "")
         t1 = st["t1"]["status"] + (f" ({st['t1']['reason']})" if st["t1"]["reason"] else "")
-        flag = "  <<<<" if subj == "sub-051" else ""
-        print(f"  {subj}: t1 {t1}; t2 {t2}; in_c1 {st['in_c1']}; in_c3 {st['in_c3']}{flag}")
+        flag = "  <<<<" if not (st["in_c1"] and st["in_c3"]) and (st["t1"]["status"] == "excluded" or (
+            st["t2"] is not None and st["t2"]["status"] == "excluded")) else ""
+        emit(f"  {subj}: t1 {t1}; t2 {t2}; in_c1 {st['in_c1']}; in_c3 {st['in_c3']}{flag}")
     return 0
 
 
