@@ -82,11 +82,13 @@ Note (2026-09-28): done; mu_ref = 7.572449764282774, sigma_ref = 1.1314133844220
 
 ## Stage B: Data and preprocessing (runs in Phase 1)
 
-### [ ] B1. download.py
+### [x] B1. download.py
 Read: §4.1, §18.
 Done when:
 - ds003775 v1.2.1 is in `data/`, and 111 subjects and 153 EDF files are found.
 - A SHA-256 checksum is recorded for every file.
+
+Note (2026-09-28): done; real download of ds003775 v1.2.1 completed and passed `download.py --verify`. Manifest summary line: "# files=632 manifest_sha256=ba7785725f5f9fb3d74345a5db82276b8550de286dd044fd5896cd821ffa64b5 dataset=ds003775 version=1.2.1 openneuro_py=2026.9.1". Longest absolute path in data/ is 149 characters. One file hit a transient DNS error during the download and was retried automatically by the tool; all size and hash checks passed afterwards. Code in commit 7252c34 (IMP-007).
 
 ### [ ] B2. Split
 Read: §11.1, §17.
