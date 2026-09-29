@@ -7,6 +7,7 @@ results/ or logs/ (a test asserts the real config.yml bytes are unchanged).
 import copy
 import hashlib
 import math
+import re
 import shutil
 from pathlib import Path
 
@@ -184,8 +185,19 @@ PROV = {"seed": 42, "units": model.UNITS, "git_commit": "abc123", "git_dirty": F
 
 @pytest.fixture
 def cfg_copy(tmp_path):
+    """A temp copy of config.yml with the three A4 values reset to null (idempotent)."""
     p = tmp_path / "config.yml"
     shutil.copy(DEFAULT_CONFIG_PATH, p)
+    lines = p.read_bytes().decode("utf-8").splitlines(keepends=True)
+    pattern = re.compile(r"^(  (?:mu_ref|sigma_ref|computed_provenance): \{value: )(.*?)(?=, prov:)")
+    n = 0
+    for i, line in enumerate(lines):
+        m = pattern.match(line)
+        if m:
+            lines[i] = line[:m.start(2)] + "null" + line[m.end(2):]
+            n += 1
+    assert n == 3
+    p.write_bytes("".join(lines).encode("utf-8"))
     return p
 
 
