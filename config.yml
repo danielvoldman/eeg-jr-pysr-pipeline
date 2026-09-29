@@ -117,16 +117,21 @@ preprocessing:
     pad_s: {value: 0.5, prov: locked, ref: "§5.1", note: "each side of every rejected event; no separate tag in the doc"}
     min_clean_stretch_s: {value: 5, prov: placeholder, ref: "§5.1"}
     forbidden_tests: {value: [normality, kurtosis, lilliefors], prov: locked, ref: "§5.1"}
-  edge_trim_s: {value: 1.0, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009; trimmed from BOTH ends after the band-pass (0.5 Hz high-pass)"}
-  edge_trim_s_sensitivity_highpass: {value: 10.0, prov: placeholder, ref: "§5.1, §5.2", unit: "s", note: "IMP-009; same, for the 0.1 Hz variant"}
+  edge_trim_s: {value: 5.0, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009, raised from 1.0 by IMP-010; trimmed from BOTH ends after the band-pass (0.5 Hz high-pass)"}
+  edge_trim_s_sensitivity_highpass: {value: 25.0, prov: placeholder, ref: "§5.1, §5.2", unit: "s", note: "IMP-009, raised from 10.0 by IMP-010 (15.0 was still too short on ten seeds, then 25.0); same, for the 0.1 Hz variant"}
   edge_report:
-    seed: {value: 20260929, prov: placeholder, ref: "§5.1", note: "IMP-009; development report only, never used on data"}
+    seed: {value: 20260929, prov: placeholder, ref: "§5.1", note: "IMP-009; base seed of the development report, never used on data"}
+    n_seeds: {value: 10, prov: placeholder, ref: "§5.1", note: "IMP-010; the 0.5 Hz variant runs seeds seed + 0 ... seed + n_seeds - 1"}
+    n_seeds_slow: {value: 20, prov: placeholder, ref: "§5.1", note: "IMP-010; the 0.1 Hz variant runs seeds seed + 0 ... seed + n_seeds_slow - 1"}
     sine_hz: {value: 10, prov: placeholder, ref: "§5.1", note: "IMP-009"}
     sine_amplitude_uv: {value: 1.0, prov: placeholder, ref: "§5.1", note: "IMP-009"}
     noise_sd_uv: {value: 1.0, prov: placeholder, ref: "§5.1", note: "IMP-009; SD of the 1/f component"}
     noise_power_exponent: {value: 1.0, prov: placeholder, ref: "§5.1", note: "IMP-009; power spectrum proportional to f^-exponent"}
     margin_s: {value: 60, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009; extra signal on each side, used to get the transient-free reference output"}
     max_deviation_fraction_of_sd: {value: 0.01, prov: placeholder, ref: "§5.1", note: "IMP-009; STOP if the deviation after the trim exceeds this fraction of the filtered signal SD"}
+  electrode_diagnostics:
+    alpha_band_hz: {value: [8, 13], prov: placeholder, ref: "§5.1", note: "IMP-010; read-only pilot diagnostic, never used to change a value"}
+    total_band_hz: {value: [1, 45], prov: placeholder, ref: "§5.1", note: "IMP-010; denominator band of the relative alpha power; the periodogram segment length is simulator.sanity_welch_segment_s (same method as the IMP-005 alpha-peak diagnostic)"}
   cache:
     subdir: {value: "preprocessed_b4", prov: placeholder, ref: "§18", note: "IMP-009; under paths.cache_dir"}
   min_clean_data_per_recording_s: {value: 60, prov: placeholder, ref: "§12"}

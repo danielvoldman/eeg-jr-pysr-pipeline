@@ -553,40 +553,116 @@ def _shaped_noise(rng, n, exponent):
     return y / y.std(ddof=1)
 
 
-def edge_transient_report(cfg):
-    """Rows for both high-pass variants: filter a recording-length noise-like signal alone, and
-    inside a longer signal (transient-free reference); compare over the recording length.
-    """
+def _edge_row(cfg, seed, sens):
+    """One variant, one seed: filter a recording-length noise-like signal alone, and inside a longer
+    signal (transient-free reference); compare over the recording length."""
     er = cfg["preprocessing"]["edge_report"]
     fs = float(cfg["dataset"]["native_fs_hz"])
     n = int(round(cfg["dataset"]["recording_length_s"] * fs))
     m = int(round(er["margin_s"] * fs))
-    rng = np.random.default_rng(er["seed"])
+    rng = np.random.default_rng(seed)
     t = np.arange(n + 2 * m, dtype=np.float64) / fs
     x = (er["noise_sd_uv"] * _shaped_noise(rng, n + 2 * m, er["noise_power_exponent"])
          + er["sine_amplitude_uv"] * np.sin(2 * np.pi * er["sine_hz"] * t))
     core = x[m:m + n]
     frac = er["max_deviation_fraction_of_sd"]
-    rows = []
+    hp = (cfg["preprocessing"]["sensitivity_highpass_hz"] if sens
+          else cfg["preprocessing"]["bandpass"]["highpass_hz"])
+    trim_s = edge_trim_seconds(cfg, sens)
+    ideal = bandpass(cfg, x, fs, hp)[m:m + n]
+    dev = np.abs(bandpass(cfg, core, fs, hp) - ideal)
+    sd = float(ideal.std(ddof=1))
+    k = int(round(trim_s * fs))
+    over = np.flatnonzero(dev > frac * sd)
+    first, last = over[over < n // 2], over[over >= n // 2]
+    return {
+        "seed": int(seed), "highpass_hz": hp, "edge_trim_s": trim_s, "signal_sd": sd,
+        "untrimmed_max_frac": float(dev.max() / sd),
+        "seconds_above_limit_start": (first.max() + 1) / fs if first.size else 0.0,
+        "seconds_above_limit_end": (n - last.min()) / fs if last.size else 0.0,
+        "trimmed_max_frac": float(dev[k:n - k].max() / sd),
+        "exceeds": bool(dev[k:n - k].max() > frac * sd),
+    }
+
+
+def edge_transient_report(cfg):
+    """One dict per high-pass variant: per-seed rows (seeds seed + 0 ... seed + n - 1, n = n_seeds for the
+    0.5 Hz variant, n_seeds_slow for the 0.1 Hz variant) and worst cases."""
+    er = cfg["preprocessing"]["edge_report"]
+    variants = []
     for sens in (False, True):
-        hp = (cfg["preprocessing"]["sensitivity_highpass_hz"] if sens
-              else cfg["preprocessing"]["bandpass"]["highpass_hz"])
-        trim_s = edge_trim_seconds(cfg, sens)
-        ideal = bandpass(cfg, x, fs, hp)[m:m + n]
-        dev = np.abs(bandpass(cfg, core, fs, hp) - ideal)
-        sd = float(ideal.std(ddof=1))
-        k = int(round(trim_s * fs))
-        over = np.flatnonzero(dev > frac * sd)
-        first, last = over[over < n // 2], over[over >= n // 2]
-        rows.append({
-            "highpass_hz": hp, "edge_trim_s": trim_s, "signal_sd": sd,
-            "untrimmed_max_frac": float(dev.max() / sd),
-            "seconds_above_limit_start": (first.max() + 1) / fs if first.size else 0.0,
-            "seconds_above_limit_end": (n - last.min()) / fs if last.size else 0.0,
-            "trimmed_max_frac": float(dev[k:n - k].max() / sd),
-            "exceeds": bool(dev[k:n - k].max() > frac * sd),
+        n_seeds = er["n_seeds_slow"] if sens else er["n_seeds"]
+        per_seed = [_edge_row(cfg, er["seed"] + i, sens) for i in range(n_seeds)]
+        variants.append({
+            "highpass_hz": per_seed[0]["highpass_hz"], "edge_trim_s": per_seed[0]["edge_trim_s"],
+            "per_seed": per_seed,
+            "worst_untrimmed_max_frac": max(r["untrimmed_max_frac"] for r in per_seed),
+            "worst_seconds_above_limit_start": max(r["seconds_above_limit_start"] for r in per_seed),
+            "worst_seconds_above_limit_end": max(r["seconds_above_limit_end"] for r in per_seed),
+            "worst_trimmed_max_frac": max(r["trimmed_max_frac"] for r in per_seed),
+            "exceeds": any(r["exceeds"] for r in per_seed),
         })
-    return rows
+    return variants
+
+
+# ---------------------------------------------------------------- electrode diagnostics (read-only, IMP-010)
+
+def _periodogram(cfg, x, fs_hz):
+    """Mean periodogram of non-overlapping, mean-removed Hann segments (the IMP-005 alpha-peak method);
+    x is (n_channels, n_samples). Returns (freqs, psd)."""
+    nseg = int(round(cfg["simulator"]["sanity_welch_segment_s"] * fs_hz))
+    nblk = x.shape[-1] // nseg
+    blocks = x[:, :nblk * nseg].reshape(x.shape[0], nblk, nseg)
+    blocks = (blocks - blocks.mean(axis=-1, keepdims=True)) * np.hanning(nseg)
+    psd = np.mean(np.abs(np.fft.rfft(blocks, axis=-1)) ** 2, axis=1)
+    return np.fft.rfftfreq(nseg, 1.0 / fs_hz), psd
+
+
+def electrode_diagnostics(cfg, filtered_uv, ch_names, fs_hz):
+    """RMS of every channel and, for the four required electrodes, rank, alpha peak and relative alpha.
+
+    filtered_uv: (n_channels, n_samples) after notch, band-pass and edge trim, as in the pipeline.
+    Print-only: nothing here changes a threshold or is stored.
+    """
+    ed = cfg["preprocessing"]["electrode_diagnostics"]
+    lo_a, hi_a = ed["alpha_band_hz"]
+    lo_t, hi_t = ed["total_band_hz"]
+    rms_all = np.sqrt(np.mean(filtered_uv ** 2, axis=-1))
+    med = float(np.median(rms_all))
+    rms_floor = cfg["preprocessing"]["bad_channel"]["rms_min_uv"]
+    freqs, psd = _periodogram(cfg, filtered_uv, fs_hz)
+    in_alpha = (freqs >= lo_a) & (freqs <= hi_a)
+    in_total = (freqs >= lo_t) & (freqs <= hi_t)
+    out = {"n_channels": int(rms_all.size), "rms_median": med, "rms_min": float(rms_all.min()),
+           "rms_max": float(rms_all.max()), "n_below_floor": int(np.count_nonzero(rms_all < rms_floor)),
+           "electrodes": {}}
+    for name in required_labels(cfg):
+        i = ch_names.index(name)
+        out["electrodes"][name] = {
+            "rms_uv": float(rms_all[i]), "rms_over_median": float(rms_all[i] / med),
+            "rank": int(np.count_nonzero(rms_all < rms_all[i])) + 1,
+            "alpha_peak_hz": float(freqs[in_alpha][int(np.argmax(psd[i][in_alpha]))]),
+            "relative_alpha": float(psd[i][in_alpha].sum() / psd[i][in_total].sum()),
+            "below_floor": bool(rms_all[i] < rms_floor),
+        }
+    return out
+
+
+def recording_electrode_diagnostics(cfg, rec):
+    """Diagnostics for one loaded Recording with the pipeline's notch, band-pass and edge trim."""
+    filt = trim_edges(bandpass(cfg, notch(cfg, rec.data_uv, rec.fs_hz), rec.fs_hz,
+                               cfg["preprocessing"]["bandpass"]["highpass_hz"]),
+                      rec.fs_hz, edge_trim_seconds(cfg))
+    return electrode_diagnostics(cfg, filt, rec.ch_names, rec.fs_hz)
+
+
+def print_electrode_diagnostics(d):
+    print(f"    all channels' RMS (uV): median {d['rms_median']:.3f}, min {d['rms_min']:.3f}, "
+          f"max {d['rms_max']:.3f} | channels below the RMS floor: {d['n_below_floor']} of {d['n_channels']}")
+    for name, e in d["electrodes"].items():
+        print(f"      {name:>4}: RMS {e['rms_uv']:8.3f} uV = {e['rms_over_median']:.3f} x median | "
+              f"rank {e['rank']:>2} of {d['n_channels']} (1 = lowest) | alpha peak {e['alpha_peak_hz']:6.3f} Hz | "
+              f"relative alpha {e['relative_alpha']:.4f} | below floor: {'YES' if e['below_floor'] else 'no'}")
 
 
 # ---------------------------------------------------------------- pilot report (CLI)
@@ -597,22 +673,46 @@ def pilot_recordings(cfg, root, pilot_ids):
     return [p for s in sorted(pilot_ids) for p in sorted(data.glob(pattern.replace("sub-*", s, 1)))]
 
 
-def print_edge_report(cfg, rows):
+def print_edge_report(cfg, variants):
     er = cfg["preprocessing"]["edge_report"]
     limit = er["max_deviation_fraction_of_sd"]
-    print(f"\n[edge transient] 1/f noise + {er['sine_hz']} Hz sine, seed {er['seed']}, "
-          f"{cfg['dataset']['recording_length_s']} s at {cfg['dataset']['native_fs_hz']} Hz; deviation from the "
-          f"transient-free reference as a fraction of the filtered signal SD (limit {limit})")
-    print(f"{'hp (Hz)':>8} {'trim (s)':>9} {'sig SD':>8} {'max dev, no trim':>17} "
-          f"{'s>lim start':>12} {'s>lim end':>10} {'max dev after trim':>19} {'verdict':>8}")
-    for r in rows:
-        print(f"{r['highpass_hz']:>8} {r['edge_trim_s']:>9} {r['signal_sd']:>8.4f} {r['untrimmed_max_frac']:>17.5f} "
-              f"{r['seconds_above_limit_start']:>12.3f} {r['seconds_above_limit_end']:>10.3f} "
-              f"{r['trimmed_max_frac']:>19.5f} {'STOP' if r['exceeds'] else 'ok':>8}")
+    print(f"\n[edge transient] 1/f noise + {er['sine_hz']} Hz sine, base seed {er['seed']} "
+          f"(0.5 Hz variant {er['n_seeds']} seeds, 0.1 Hz variant {er['n_seeds_slow']} seeds), "
+          f"{cfg['dataset']['recording_length_s']} s at "
+          f"{cfg['dataset']['native_fs_hz']} Hz; deviation from the transient-free reference as a fraction of "
+          f"the filtered signal SD (limit {limit})")
+    for v in variants:
+        print(f"\n  high-pass {v['highpass_hz']} Hz, edge trim {v['edge_trim_s']} s: "
+              f"worst deviation after trim {v['worst_trimmed_max_frac']:.6f} | worst seconds above the limit: "
+              f"start {v['worst_seconds_above_limit_start']:.3f}, end {v['worst_seconds_above_limit_end']:.3f} | "
+              f"{'STOP' if v['exceeds'] else 'ok'}")
+        print(f"  {'seed':>10} {'sig SD':>8} {'max dev, no trim':>17} {'s>lim start':>12} {'s>lim end':>10} "
+              f"{'max dev after trim':>19} {'verdict':>8}")
+        for r in v["per_seed"]:
+            print(f"  {r['seed']:>10} {r['signal_sd']:>8.4f} {r['untrimmed_max_frac']:>17.5f} "
+                  f"{r['seconds_above_limit_start']:>12.3f} {r['seconds_above_limit_end']:>10.3f} "
+                  f"{r['trimmed_max_frac']:>19.6f} {'STOP' if r['exceeds'] else 'ok':>8}")
 
 
-def pilot_report(cfg, root):
-    """B3 + B4 on the pilot subjects' recordings; prints only, stores nothing in config.yml."""
+def flag_summary(flagged_recordings, flagged_subjects, n_recordings, n_subjects):
+    """Fractions of the pilot that the current bad-electrode rule flags."""
+    return {"recordings": flagged_recordings, "n_recordings": n_recordings,
+            "recording_fraction": flagged_recordings / n_recordings,
+            "subjects": len(flagged_subjects), "n_subjects": n_subjects,
+            "subject_fraction": len(flagged_subjects) / n_subjects}
+
+
+def print_flag_summary(s):
+    print(f"\n[current rule] recordings with at least one bad electrode: {s['recordings']} of {s['n_recordings']} "
+          f"({s['recording_fraction']:.3f}); subjects with at least one such recording: "
+          f"{s['subjects']} of {s['n_subjects']} ({s['subject_fraction']:.3f})")
+
+
+def pilot_report(cfg, root, electrode_diag=False):
+    """B3 + B4 on the pilot subjects' recordings; prints only, stores nothing in config.yml.
+
+    electrode_diag adds the read-only all-channel RMS and alpha diagnostics (pilot subjects only).
+    """
     pilot_ids = load_pilot_ids(cfg, root)
     manifest = load_manifest(Path(root) / cfg["paths"]["manifest_file"])
     cache_root = Path(root) / cfg["paths"]["cache_dir"]
@@ -622,6 +722,7 @@ def pilot_report(cfg, root):
           f"units check high-pass {cfg['preprocessing']['units_check']['highpass_hz']} Hz, "
           f"edge trim {cfg['preprocessing']['edge_trim_s']} s")
     n_fail = 0
+    flagged_recordings, flagged_subjects = 0, set()
     for f in files:
         res = preprocess_recording(cfg, f, data_root, manifest, pilot_ids, cache_root=cache_root)
         m = res.meta
@@ -636,13 +737,19 @@ def pilot_report(cfg, root):
                   f"flat 1-s segments {e['flat_segments']} | bad-electrode flag: {flag}")
         if m["bad_electrodes"]:
             print(f"    BAD ELECTRODES: {', '.join(m['bad_electrodes'])}")
+            flagged_recordings += 1
+            flagged_subjects.add(m["subject"])
+        if electrode_diag and m["units_passed"]:
+            rec = load_recording(cfg, f, data_root, manifest, pilot_ids, known_sha256=m["sha256"])
+            print_electrode_diagnostics(recording_electrode_diagnostics(cfg, rec))
     halt = units_check_halt(cfg, n_fail, len(files))
     print(f"\n[units check] {halt.n_failed} of {halt.n_total} failed ({halt.fraction:.4f}); "
           f"halt: {'YES' if halt.halt else 'no'}")
-    rows = edge_transient_report(cfg)
-    print_edge_report(cfg, rows)
-    if any(r["exceeds"] for r in rows):
-        print("\nSTOP: the deviation after the trim exceeds the limit for at least one variant; "
+    print_flag_summary(flag_summary(flagged_recordings, flagged_subjects, len(files), len(pilot_ids)))
+    variants = edge_transient_report(cfg)
+    print_edge_report(cfg, variants)
+    if any(v["exceeds"] for v in variants):
+        print("\nSTOP: the deviation after the trim exceeds the limit for at least one variant and seed; "
               "the edge trims are too short. Nothing was changed.")
         return 1
     return 0
@@ -652,6 +759,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="B3/B4 recording preprocessing")
     parser.add_argument("--pilot-report", action="store_true",
                         help="run B3 and B4 on the pilot subjects' recordings and print a report")
+    parser.add_argument("--electrode-diagnostics", action="store_true",
+                        help="with --pilot-report: print read-only all-channel RMS and alpha diagnostics")
     args = parser.parse_args(argv)
     if not args.pilot_report:
         parser.error("nothing to do; use --pilot-report")
@@ -662,7 +771,7 @@ def main(argv=None):
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.getLogger("pipeline").addHandler(handler)
     logging.getLogger("pipeline").setLevel(logging.INFO)
-    return pilot_report(cfg, REPO_ROOT)
+    return pilot_report(cfg, REPO_ROOT, electrode_diag=args.electrode_diagnostics)
 
 
 if __name__ == "__main__":

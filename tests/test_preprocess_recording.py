@@ -24,7 +24,7 @@ CFG = load_config()
 FS = float(CFG["dataset"]["native_fs_hz"])
 PP = CFG["preprocessing"]
 SEED = 20260929          # test-local noise seed; not a pipeline seed
-N_SAMPLES = int(30 * FS)  # 30 s recordings: longer than the 10 s edge padding
+N_SAMPLES = int(60 * FS)  # 60 s recordings: longer than the 10 s edge padding and twice the longest edge trim, 25 s (IMP-010)
 EEG_NAMES = ["P3", "PO3", "P4", "PO4", "Fz", "Cz", "Oz", "O1"]
 SUBJECT, SESSION = "sub-001", "ses-t1"
 
@@ -491,12 +491,12 @@ def test_trim_edges_removes_exactly_the_configured_seconds_from_each_end():
     assert y.size == N_SAMPLES - 2 * k and y[0] == k and y[-1] == N_SAMPLES - 1 - k
     ks = int(round(PP["edge_trim_s_sensitivity_highpass"] * FS))
     z = preprocess.trim_edges(x, FS, preprocess.edge_trim_seconds(CFG, True))
-    assert PP["edge_trim_s_sensitivity_highpass"] == 10.0 and z.size == N_SAMPLES - 2 * ks
+    assert z.size == N_SAMPLES - 2 * ks
 
 
 def test_recording_lengths_after_trim(rec):
-    assert run(rec).meta["n_samples_after_trim"] == N_SAMPLES - 2 * int(FS)
-    assert run(rec, sensitivity_highpass=True).meta["n_samples_after_trim"] == N_SAMPLES - 2 * int(10 * FS)
+    assert run(rec).meta["n_samples_after_trim"] == N_SAMPLES - 2 * int(round(PP["edge_trim_s"] * FS))
+    assert run(rec, sensitivity_highpass=True).meta["n_samples_after_trim"] == N_SAMPLES - 2 * int(round(PP["edge_trim_s_sensitivity_highpass"] * FS))
 
 
 # ---------------------------------------------------------------- variants
@@ -652,7 +652,10 @@ def test_imp009_config_leaves_are_placeholders_and_set():
     assert "saturation_threshold" not in pp["bad_channel"] and "notch_width" not in pp["line_noise"]
     assert pp["bad_channel"]["saturation_min_run_s"]["value"] == 0.05
     assert pp["line_noise"]["notch_q"]["value"] == 30
-    assert pp["edge_trim_s"]["value"] == 1.0 and pp["edge_trim_s_sensitivity_highpass"]["value"] == 10.0
+    assert pp["edge_trim_s"]["value"] == 5.0 and pp["edge_trim_s_sensitivity_highpass"]["value"] == 25.0   # IMP-010
+    assert pp["edge_report"]["n_seeds"]["prov"] == "placeholder" and pp["edge_report"]["n_seeds"]["value"] == 10
+    assert pp["edge_report"]["n_seeds_slow"]["prov"] == "placeholder" and pp["edge_report"]["n_seeds_slow"]["value"] == 20
+    assert 2 * pp["edge_trim_s_sensitivity_highpass"]["value"] < N_SAMPLES / FS
 
 
 def test_functions_write_nothing_to_run_time_folders(rec):
@@ -663,3 +666,148 @@ def test_functions_write_nothing_to_run_time_folders(rec):
     before = snapshot()
     run(rec)
     assert snapshot() == before
+
+
+# ---------------------------------------------------------------- IMP-010: multi-seed edge report
+
+def _edge_cfg(n_seeds=3, short=True, **trims):   # n_seeds applies to both variants
+    cfg = copy.deepcopy(CFG)
+    er = cfg["preprocessing"]["edge_report"]
+    er["n_seeds"] = er["n_seeds_slow"] = n_seeds
+    if short:                                       # shorter than the real recordings, for test speed only
+        cfg["dataset"]["recording_length_s"] = 150
+        er["margin_s"] = 30
+    for key, val in trims.items():
+        cfg["preprocessing"][key] = val
+    return cfg
+
+
+def test_edge_report_runs_consecutive_seeds_from_the_base_seed():
+    cfg = _edge_cfg(n_seeds=3)
+    base = cfg["preprocessing"]["edge_report"]["seed"]
+    variants = preprocess.edge_transient_report(cfg)
+    assert len(variants) == 2
+    for v, hp in zip(variants, (PP["bandpass"]["highpass_hz"], PP["sensitivity_highpass_hz"])):
+        assert v["highpass_hz"] == hp
+        assert [r["seed"] for r in v["per_seed"]] == [base, base + 1, base + 2]
+    assert variants[0]["edge_trim_s"] == PP["edge_trim_s"]
+    assert variants[1]["edge_trim_s"] == PP["edge_trim_s_sensitivity_highpass"]
+
+
+def test_edge_report_worst_cases_are_the_maxima_over_seeds():
+    for v in preprocess.edge_transient_report(_edge_cfg(n_seeds=3)):
+        rows = v["per_seed"]
+        assert v["worst_trimmed_max_frac"] == max(r["trimmed_max_frac"] for r in rows)
+        assert v["worst_seconds_above_limit_start"] == max(r["seconds_above_limit_start"] for r in rows)
+        assert v["worst_seconds_above_limit_end"] == max(r["seconds_above_limit_end"] for r in rows)
+        assert v["worst_untrimmed_max_frac"] == max(r["untrimmed_max_frac"] for r in rows)
+        assert v["exceeds"] == any(r["exceeds"] for r in rows)
+        assert len({r["signal_sd"] for r in rows}) == len(rows)      # different seeds, different noise
+
+
+def test_edge_report_is_deterministic_and_seed_dependent():
+    a = preprocess.edge_transient_report(_edge_cfg(n_seeds=2))
+    b = preprocess.edge_transient_report(_edge_cfg(n_seeds=2))
+    assert a == b
+    assert a[0]["per_seed"][0]["trimmed_max_frac"] != a[0]["per_seed"][1]["trimmed_max_frac"]
+
+
+def test_edge_report_configured_trims_meet_the_limit_and_zero_trim_does_not():
+    cfg = _edge_cfg(n_seeds=2, short=False)          # the real 240 s length: the limit is judged on it
+    limit = cfg["preprocessing"]["edge_report"]["max_deviation_fraction_of_sd"]
+    for v in preprocess.edge_transient_report(cfg):
+        assert v["worst_trimmed_max_frac"] <= limit and not v["exceeds"]
+        assert v["worst_untrimmed_max_frac"] > limit
+    zero = preprocess.edge_transient_report(
+        _edge_cfg(n_seeds=2, edge_trim_s=0.0, edge_trim_s_sensitivity_highpass=0.0))
+    assert all(v["exceeds"] for v in zero)                             # the check can fail
+
+
+def test_edge_report_uses_n_seeds_slow_for_the_01hz_variant():
+    cfg = _edge_cfg(n_seeds=2)
+    cfg["preprocessing"]["edge_report"]["n_seeds_slow"] = 3
+    fast, slow = preprocess.edge_transient_report(cfg)
+    base = cfg["preprocessing"]["edge_report"]["seed"]
+    assert [r["seed"] for r in fast["per_seed"]] == [base, base + 1]
+    assert [r["seed"] for r in slow["per_seed"]] == [base, base + 1, base + 2]
+
+
+def test_edge_report_prints_per_seed_rows(capsys):
+    cfg = _edge_cfg(n_seeds=2)
+    preprocess.print_edge_report(cfg, preprocess.edge_transient_report(cfg))
+    out = capsys.readouterr().out
+    base = cfg["preprocessing"]["edge_report"]["seed"]
+    assert str(base) in out and str(base + 1) in out and "worst deviation after trim" in out
+    assert out.count("worst deviation after trim") == 2
+
+
+# ---------------------------------------------------------------- IMP-010: electrode diagnostics
+
+def _diag_data(n_ch=64, seed=SEED):
+    rng = np.random.default_rng(seed)
+    names = [f"c{i}" for i in range(n_ch - 4)] + ["P3", "PO3", "P4", "PO4"]
+    x = 20.0 * rng.standard_normal((n_ch, N_SAMPLES))
+    return names, x
+
+
+def test_electrode_diagnostics_rms_rank_and_floor():
+    names, x = _diag_data()
+    x[names.index("P3")] *= 0.1              # about 2 uV: below the 5 uV floor, lowest of all
+    x[names.index("PO3")] *= 5.0             # about 100 uV: highest
+    d = preprocess.electrode_diagnostics(CFG, x, names, FS)
+    rms_all = np.sqrt(np.mean(x ** 2, axis=-1))
+    assert d["n_channels"] == 64 and d["rms_median"] == pytest.approx(np.median(rms_all))
+    assert d["rms_min"] == pytest.approx(rms_all.min()) and d["rms_max"] == pytest.approx(rms_all.max())
+    p3, po3, p4 = (d["electrodes"][n] for n in ("P3", "PO3", "P4"))
+    assert p3["rank"] == 1 and po3["rank"] == 64
+    assert p3["below_floor"] and not po3["below_floor"] and not p4["below_floor"]
+    assert p3["rms_over_median"] == pytest.approx(rms_all[names.index("P3")] / np.median(rms_all))
+    assert d["n_below_floor"] == int(np.count_nonzero(rms_all < PP["bad_channel"]["rms_min_uv"])) == 1
+    assert set(d["electrodes"]) == {"P3", "PO3", "P4", "PO4"}
+
+
+def test_electrode_diagnostics_alpha_peak_and_relative_alpha():
+    names, x = _diag_data()
+    t = np.arange(N_SAMPLES) / FS
+    x[names.index("PO4")] += 200.0 * np.sin(2 * np.pi * 10.5 * t)
+    d = preprocess.electrode_diagnostics(CFG, x, names, FS)
+    po4, p3 = d["electrodes"]["PO4"], d["electrodes"]["P3"]
+    assert po4["alpha_peak_hz"] == pytest.approx(10.5, abs=0.13)     # bin width 1 / 8 s
+    assert po4["relative_alpha"] > 0.9
+    assert 0.0 < p3["relative_alpha"] < 0.3                           # white noise: 5 Hz of about 44 Hz
+    lo, hi = CFG["preprocessing"]["electrode_diagnostics"]["alpha_band_hz"]
+    assert lo <= p3["alpha_peak_hz"] <= hi
+
+
+def test_periodogram_matches_the_alpha_peak_method_of_model_py():
+    from src import model            # the test may import model.py; preprocess.py may not
+    _, x = _diag_data(n_ch=2)
+    freqs, psd = preprocess._periodogram(CFG, x, FS)
+    seg = CFG["simulator"]["sanity_welch_segment_s"]
+    peak = float(freqs[1 + int(np.argmax(psd[0, 1:]))])
+    assert peak == model._alpha_peak_hz(x[0], FS, seg)
+
+
+def test_recording_electrode_diagnostics_uses_the_pipeline_filter_and_trim(rec):
+    edf, man, root, pilots = rec
+    loaded = preprocess.load_recording(CFG, edf, root, man, pilots)
+    d = preprocess.recording_electrode_diagnostics(CFG, loaded)
+    hp, trim = PP["bandpass"]["highpass_hz"], PP["edge_trim_s"]
+    for name in ("P3", "PO3", "P4", "PO4"):
+        ref = preprocess.trim_edges(preprocess.bandpass(
+            CFG, preprocess.notch(CFG, loaded.data_uv[loaded.ch_names.index(name)], FS), FS, hp), FS, trim)
+        assert d["electrodes"][name]["rms_uv"] == pytest.approx(rms(ref), rel=1e-12)
+    assert d["n_channels"] == len(EEG_NAMES)
+
+
+def test_flag_summary_fractions():
+    s = preprocess.flag_summary(4, {"sub-001", "sub-002", "sub-003"}, 16, 12)
+    assert (s["recordings"], s["subjects"]) == (4, 3)
+    assert s["recording_fraction"] == pytest.approx(0.25) and s["subject_fraction"] == pytest.approx(0.25)
+    assert preprocess.flag_summary(0, set(), 16, 12)["recording_fraction"] == 0.0
+
+
+def test_electrode_diagnostics_config_leaves_are_placeholders():
+    raw = __import__("yaml").safe_load((REPO_ROOT / "config.yml").read_text(encoding="utf-8"))
+    for leaf in raw["preprocessing"]["electrode_diagnostics"].values():
+        assert leaf["prov"] == "placeholder" and leaf["value"] is not None
