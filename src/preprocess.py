@@ -665,6 +665,72 @@ def print_electrode_diagnostics(d):
               f"relative alpha {e['relative_alpha']:.4f} | below floor: {'YES' if e['below_floor'] else 'no'}")
 
 
+# ---------------------------------------------------------------- bipolar 1-s segment RMS (print-only, IMP-011)
+
+def segment_rms(cfg, x, fs_hz):
+    """RMS of every whole, non-overlapping 1-s segment (rejection.segment_length_s); x is (n_ch, n)."""
+    seg = int(round(cfg["preprocessing"]["rejection"]["segment_length_s"] * fs_hz))
+    n_seg = x.shape[-1] // seg
+    if n_seg == 0:
+        raise PreprocessError(f"segment_rms: {x.shape[-1]} samples hold no whole {seg}-sample segment")
+    blocks = x[:, :n_seg * seg].reshape(x.shape[0], n_seg, seg)
+    return np.sqrt(np.mean(blocks ** 2, axis=-1))
+
+
+def segment_rms_summary(cfg, seg_rms):
+    """Percentiles and threshold fractions of one channel's 1-s segment RMS values (uV). Print-only."""
+    ed = cfg["preprocessing"]["electrode_diagnostics"]
+    lo, hi = rms_bounds(cfg)
+    pcts = ed["segment_rms_percentiles"]
+    ref = ed["segment_rms_reference_uv"]
+    return {"n_segments": int(seg_rms.size), "percentiles": dict(zip(pcts, np.percentile(seg_rms, pcts))),
+            "median": float(np.median(seg_rms)), "lo": lo, "ref": ref, "hi": hi,
+            "frac_below_lo": float(np.mean(seg_rms < lo)), "frac_below_ref": float(np.mean(seg_rms < ref)),
+            "frac_above_hi": float(np.mean(seg_rms > hi))}
+
+
+def bipolar_segment_report(cfg, root):
+    """Pilot subjects only: per recording and bipolar channel, the 1-s segment RMS summary. Nothing stored,
+    no rejection applied. Uses the pipeline's notch, band-pass and edge trim (preprocess_recording)."""
+    pilot_ids = load_pilot_ids(cfg, root)
+    manifest = load_manifest(Path(root) / cfg["paths"]["manifest_file"])
+    cache_root = Path(root) / cfg["paths"]["cache_dir"]
+    data_root = Path(root) / cfg["paths"]["data_dir"]
+    files = pilot_recordings(cfg, root, pilot_ids)
+    names = [f"{cfg['preprocessing']['channels'][s][0]}-{cfg['preprocessing']['channels'][s][1]}"
+             for s in ("left_pair", "right_pair")]
+    rows = []
+    for f in files:
+        res = preprocess_recording(cfg, f, data_root, manifest, pilot_ids, cache_root=cache_root)
+        if res.bipolar is None:
+            continue
+        fs = res.meta["fs_hz"]
+        seg = segment_rms(cfg, res.bipolar, fs)
+        for i, name in enumerate(names):
+            rows.append({"subject": res.meta["subject"], "session": res.meta["session"], "channel": name,
+                         **segment_rms_summary(cfg, seg[i])})
+    return names, rows, len(files)
+
+
+def print_bipolar_segment_report(cfg, names, rows, n_files):
+    ed = cfg["preprocessing"]["electrode_diagnostics"]
+    pcts = ed["segment_rms_percentiles"]
+    lo, ref, hi = rows[0]["lo"], rows[0]["ref"], rows[0]["hi"]
+    print(f"\n[bipolar 1-s segment RMS] pilot subjects, {n_files} recordings, after the pipeline's notch, band-pass "
+          f"and edge trim; print-only, no rejection applied")
+    print(f"  {'recording':<16} {'channel':<8} {'n seg':>5} " + " ".join(f"{'p' + str(p):>8}" for p in pcts)
+          + f" {'<' + str(lo) + ' uV':>9} {'<' + str(ref) + ' uV':>9} {'>' + str(hi) + ' uV':>9}")
+    for r in rows:
+        print(f"  {r['subject'] + ' ' + r['session']:<16} {r['channel']:<8} {r['n_segments']:>5} "
+              + " ".join(f"{r['percentiles'][p]:>8.3f}" for p in pcts)
+              + f" {r['frac_below_lo']:>9.4f} {r['frac_below_ref']:>9.4f} {r['frac_above_hi']:>9.4f}")
+    for name in names:
+        meds = [r["median"] for r in rows if r["channel"] == name]
+        print(f"  median over {len(meds)} recordings of the median segment RMS, {name}: {float(np.median(meds)):.3f} uV")
+    print(f"  median over all {len(rows)} recording-channel medians: "
+          f"{float(np.median([r['median'] for r in rows])):.3f} uV")
+
+
 # ---------------------------------------------------------------- pilot report (CLI)
 
 def pilot_recordings(cfg, root, pilot_ids):
@@ -761,9 +827,11 @@ def main(argv=None):
                         help="run B3 and B4 on the pilot subjects' recordings and print a report")
     parser.add_argument("--electrode-diagnostics", action="store_true",
                         help="with --pilot-report: print read-only all-channel RMS and alpha diagnostics")
+    parser.add_argument("--bipolar-segment-report", action="store_true",
+                        help="print-only 1-s segment RMS diagnostic of the bipolar channels (pilot subjects only)")
     args = parser.parse_args(argv)
-    if not args.pilot_report:
-        parser.error("nothing to do; use --pilot-report")
+    if not (args.pilot_report or args.bipolar_segment_report):
+        parser.error("nothing to do; use --pilot-report or --bipolar-segment-report")
     cfg = load_config()
     log_dir = REPO_ROOT / cfg["paths"]["logs_dir"]
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -771,6 +839,10 @@ def main(argv=None):
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.getLogger("pipeline").addHandler(handler)
     logging.getLogger("pipeline").setLevel(logging.INFO)
+    if args.bipolar_segment_report:
+        names, rows, n_files = bipolar_segment_report(cfg, REPO_ROOT)
+        print_bipolar_segment_report(cfg, names, rows, n_files)
+        return 0
     return pilot_report(cfg, REPO_ROOT, electrode_diag=args.electrode_diagnostics)
 
 

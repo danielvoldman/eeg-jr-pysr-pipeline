@@ -107,7 +107,7 @@ Note (2026-09-29): done; real split written with `main.py --make-split` (code co
 - Per seed: 78 train, 33 test, 12 pilot; pilot within train, disjoint from test, train and test disjoint. t2 subjects on the test side: seed 42 = 8, 43 = 16, 44 = 11, 45 = 12, 46 = 9 (of 42 t2 subjects in total).
 - The 12 pilot IDs, identical in all five seeds: sub-005, sub-008, sub-019, sub-051, sub-056, sub-063, sub-074, sub-081, sub-082, sub-086, sub-088, sub-107.
 
-### [ ] B3. Loading and units check
+### [x] B3. Loading and units check
 Read: §4.2, §5.1 steps 1–2.
 Done when:
 - Files are loaded with `units="uV"` and their SHA-256 checksum is recorded.
@@ -116,7 +116,9 @@ Done when:
 - For sub-010 ses-t1, the EEG is read and only its scans.tsv is skipped.
 - Every exclusion is logged.
 
-### [ ] B4. Channel pipeline, part 1
+Note (2026-09-29): done; verified by the pilot report (`python -m src.preprocess --pilot-report`): 16 of 16 SHA-256 checksums OK, 0 of 16 units-check failures (halt: no), median SD after the 0.5 Hz high-pass 4.4 to 11.3 uV. Code commit 0643fd9, fixes 146c21f (IMP-009, IMP-010). Excluding recordings is B6; here only flagged.
+
+### [x] B4. Channel pipeline, part 1
 Read: §5.1 steps 3–6, §6.
 Done when:
 - The P3, PO3, P4 and PO4 labels are verified against `channels.tsv`.
@@ -126,6 +128,8 @@ Done when:
 - The bipolar pairs P3–PO3 and P4–PO4 are formed.
 - Variant flags for §5.2 exist: 0.1 Hz high-pass, and strict rejection.
 - Phase 1 saves the band-pass impulse response for both high-pass variants (0.5 and 0.1 Hz) under outputs/ (§5.1 disclosure).
+
+Note (2026-09-29): done, with one item deferred: bandpass_impulse_response exists (A3), but saving it under outputs/ happens when phase 1 is wired, which has not been done. Verified by the pilot report and the noise-like edge report over ten seeds (0.5 Hz, trim 5.0 s: worst deviation after trim 0.13% of SD) and twenty seeds (0.1 Hz, trim 25.0 s: 0.20%), IMP-010, commit 146c21f. The electrode RMS lower bound was changed from 5 to 1 uV by DEV-001 (hash in DEVIATIONS.md); the bounds are now 1-150 uV. Bad electrodes are only flagged here; exclusion is B6 (§12). A print-only 1-s bipolar segment RMS diagnostic for B5 was added (IMP-011).
 
 ### [ ] B5. Channel pipeline, part 2
 Read: §5.1 steps 7–10, §10.2.

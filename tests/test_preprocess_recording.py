@@ -315,8 +315,16 @@ def _report(filtered, raw=None, strict=False):
     return preprocess.electrode_report(CFG, raw, filtered, FS, strict)
 
 
+RMS_LO, RMS_HI = PP["bad_channel"]["rms_min_uv"], PP["bad_channel"]["rms_max_uv"]
+
+
+def test_rms_bounds_are_the_dev001_values():
+    assert (RMS_LO, RMS_HI) == (1.0, 150)
+
+
 @pytest.mark.parametrize("target,flag", [
-    (4.99, "rms_below_min"), (5.01, None), (149.9, None), (150.1, "rms_above_max")])
+    (RMS_LO * 0.99, "rms_below_min"), (RMS_LO * 1.01, None), (RMS_HI * 0.999, None),
+    (RMS_HI * 1.001, "rms_above_max")])
 def test_rms_bounds_default(target, flag):
     flags = _report(_scaled_noise(target))["flags"]
     assert flags == ([flag] if flag else [])
@@ -383,7 +391,7 @@ def test_plateau_not_at_extreme_is_not_saturation_but_may_be_flat():
 
 
 def test_ordinary_recording_with_one_bad_electrode_names_it(tmp_path):
-    edf, man, root = make_recording(tmp_path, standard_data(overrides={"P4": 0.05}),
+    edf, man, root = make_recording(tmp_path, standard_data(overrides={"P4": 0.005}),
                                     EEG_NAMES, ["EEG"] * len(EEG_NAMES))
     res = preprocess.preprocess_recording(CFG, edf, root, man, frozenset({SUBJECT}))
     assert res.meta["bad_electrodes"] == ["P4"]
@@ -752,7 +760,7 @@ def _diag_data(n_ch=64, seed=SEED):
 
 def test_electrode_diagnostics_rms_rank_and_floor():
     names, x = _diag_data()
-    x[names.index("P3")] *= 0.1              # about 2 uV: below the 5 uV floor, lowest of all
+    x[names.index("P3")] *= 0.5 * PP["bad_channel"]["rms_min_uv"] / 20.0   # half the RMS floor: below it, lowest of all
     x[names.index("PO3")] *= 5.0             # about 100 uV: highest
     d = preprocess.electrode_diagnostics(CFG, x, names, FS)
     rms_all = np.sqrt(np.mean(x ** 2, axis=-1))
@@ -811,3 +819,75 @@ def test_electrode_diagnostics_config_leaves_are_placeholders():
     raw = __import__("yaml").safe_load((REPO_ROOT / "config.yml").read_text(encoding="utf-8"))
     for leaf in raw["preprocessing"]["electrode_diagnostics"].values():
         assert leaf["prov"] == "placeholder" and leaf["value"] is not None
+
+
+# ---------------------------------------------------------------- IMP-011: bipolar 1-s segment RMS (print-only)
+
+def test_segment_rms_per_whole_second_and_drops_the_partial_one():
+    fs = int(FS)
+    x = np.zeros((2, 3 * fs + 100))
+    x[0, :fs] = 3.0                                   # segment 0 of channel 0: RMS 3
+    x[0, fs:2 * fs] = np.tile([4.0, -4.0], fs // 2)   # RMS 4
+    x[1, 2 * fs:3 * fs] = 5.0
+    x[:, 3 * fs:] = 1e3                               # the partial last second must not count
+    r = preprocess.segment_rms(CFG, x, FS)
+    assert r.shape == (2, 3)
+    assert r[0].tolist() == pytest.approx([3.0, 4.0, 0.0]) and r[1].tolist() == pytest.approx([0.0, 0.0, 5.0])
+
+
+def test_segment_rms_refuses_input_shorter_than_one_segment():
+    with pytest.raises(preprocess.PreprocessError):
+        preprocess.segment_rms(CFG, np.zeros((2, int(FS) - 1)), FS)
+
+
+def test_segment_rms_summary_percentiles_and_fractions():
+    lo, ref, hi = RMS_LO, PP["electrode_diagnostics"]["segment_rms_reference_uv"], RMS_HI
+    v = np.array([0.5 * lo, 2.0, 0.5 * (lo + ref), 6.0, 20.0, 40.0, 60.0, 100.0, hi * 1.5, hi * 2.0])
+    s = preprocess.segment_rms_summary(CFG, v)
+    assert s["n_segments"] == 10
+    assert s["frac_below_lo"] == pytest.approx(0.1)
+    assert s["frac_below_ref"] == pytest.approx(0.3)           # 0.5, 2.0 and 3.0 are below 5
+    assert s["frac_above_hi"] == pytest.approx(0.2)
+    assert s["median"] == pytest.approx(np.median(v))
+    assert list(s["percentiles"]) == PP["electrode_diagnostics"]["segment_rms_percentiles"] == [5, 25, 50, 75, 95]
+    for p, val in s["percentiles"].items():
+        assert val == pytest.approx(np.percentile(v, p))
+    assert (s["lo"], s["hi"]) == (lo, hi)
+
+
+def test_segment_rms_summary_boundaries_are_strict():
+    v = np.array([RMS_LO, RMS_HI])                     # exactly on a bound: neither below nor above
+    s = preprocess.segment_rms_summary(CFG, v)
+    assert s["frac_below_lo"] == 0.0 and s["frac_above_hi"] == 0.0
+
+
+def test_bipolar_segment_report_on_a_recording_rejects_nothing(tmp_path, capsys):
+    data = standard_data()
+    edf, man, root = make_recording(tmp_path, data, EEG_NAMES, ["EEG"] * len(EEG_NAMES))
+    pilots = frozenset({SUBJECT})
+    res = preprocess.preprocess_recording(CFG, edf, root, man, pilots)
+    seg = preprocess.segment_rms(CFG, res.bipolar, FS)
+    assert seg.shape == (2, res.bipolar.shape[-1] // int(FS))
+    ref = np.sqrt(np.mean(res.bipolar[0, :int(FS)] ** 2))
+    assert seg[0, 0] == pytest.approx(ref, rel=1e-12)
+    rows = [{"subject": SUBJECT, "session": SESSION, "channel": n, **preprocess.segment_rms_summary(CFG, seg[i])}
+            for i, n in enumerate(["P3-PO3", "P4-PO4"])]
+    preprocess.print_bipolar_segment_report(CFG, ["P3-PO3", "P4-PO4"], rows, 1)
+    out = capsys.readouterr().out
+    assert "P3-PO3" in out and "P4-PO4" in out and "median over 1 recordings" in out
+    assert res.bipolar.shape[0] == 2                    # nothing rejected: both channels, full length
+
+
+def test_bipolar_segment_report_is_pilot_only(tmp_path):
+    edf, man, root = make_recording(tmp_path, standard_data(), EEG_NAMES, ["EEG"] * len(EEG_NAMES))
+    with pytest.raises(preprocess.DevelopmentGuardError):
+        preprocess.preprocess_recording(CFG, edf, root, man, frozenset({"sub-999"}))
+
+
+def test_segment_rms_diagnostic_config_leaves_are_placeholders():
+    raw = __import__("yaml").safe_load((REPO_ROOT / "config.yml").read_text(encoding="utf-8"))
+    ed = raw["preprocessing"]["electrode_diagnostics"]
+    for k in ("segment_rms_percentiles", "segment_rms_reference_uv"):
+        assert ed[k]["prov"] == "placeholder" and ed[k]["value"] is not None
+    assert raw["preprocessing"]["bad_channel"]["rms_min_uv"]["prov"] == "locked"
+    assert "DEV-001" in raw["preprocessing"]["bad_channel"]["rms_min_uv"]["note"]

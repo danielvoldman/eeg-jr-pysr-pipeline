@@ -84,7 +84,7 @@ preprocessing:
     left_pair: {value: [P3, PO3], prov: locked, ref: "§6", note: "verify labels against channels.tsv before use"}
     right_pair: {value: [P4, PO4], prov: locked, ref: "§6"}
   bad_channel:
-    rms_min_uv: {value: 5, prov: locked, ref: "§5.1", note: "doc writes ~5 and gives no status tag; treated as locked until told otherwise"}
+    rms_min_uv: {value: 1.0, prov: locked, ref: "§5.1", note: "doc writes ~5 and gives no status tag; treated as locked until told otherwise; changed from 5 by DEV-001"}
     rms_max_uv: {value: 150, prov: locked, ref: "§5.1", note: "doc writes ~150 and gives no status tag; treated as locked until told otherwise"}
     flatline_threshold: {value: 0.1, prov: placeholder, ref: "§5.1", unit: "uV", note: "IMP-009; a 1-s segment (rejection.segment_length_s) of the band-passed, edge-trimmed electrode whose peak-to-peak is below this is flat"}
     saturation_min_run_s: {value: 0.05, prov: placeholder, ref: "§5.1", unit: "s", note: "IMP-009; saturated if the RAW uV signal has a run of at least ceil(this * fs) consecutive samples exactly equal to the channel's own recording max or min. The header-range rule was unworkable: EDF physical min/max equal each channel's own data range in ds003775"}
@@ -132,6 +132,8 @@ preprocessing:
   electrode_diagnostics:
     alpha_band_hz: {value: [8, 13], prov: placeholder, ref: "§5.1", note: "IMP-010; read-only pilot diagnostic, never used to change a value"}
     total_band_hz: {value: [1, 45], prov: placeholder, ref: "§5.1", note: "IMP-010; denominator band of the relative alpha power; the periodogram segment length is simulator.sanity_welch_segment_s (same method as the IMP-005 alpha-peak diagnostic)"}
+    segment_rms_percentiles: {value: [5, 25, 50, 75, 95], prov: placeholder, ref: "§5.1", note: "IMP-011; print-only bipolar 1-s segment RMS diagnostic for B5, pilot subjects only, never used to change a value"}
+    segment_rms_reference_uv: {value: 5.0, prov: placeholder, ref: "§5.1", unit: "uV", note: "IMP-011; the pre-DEV-001 lower bound, kept only as a second reference level in the segment RMS diagnostic; the pipeline does not use it"}
   cache:
     subdir: {value: "preprocessed_b4", prov: placeholder, ref: "§18", note: "IMP-009; under paths.cache_dir"}
   min_clean_data_per_recording_s: {value: 60, prov: placeholder, ref: "§12"}
