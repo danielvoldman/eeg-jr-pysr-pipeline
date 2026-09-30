@@ -325,7 +325,13 @@ residual:
   derivative_baseline: {value: "total_variation", prov: locked, ref: "§8.3"}
   weak_support_ms: {value: 100, prov: placeholder, ref: "§8.3"}
   weak_support_ms_pilot_compare: {value: [60, 100, 160], prov: placeholder, ref: "§8.3"}
-  tv_weight_grid: {value: null, prov: unset, ref: "§8.3", note: "doc says a fixed 5-value grid but gives no values"}
+  tv_weight_grid: {value: [1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0], prov: placeholder, ref: "§8.3", note: "IMP-054; dimensionless alpha_rel of the TV objective (y scaled by its window SD, time in samples), fixed before any pilot result; the TV comparison uses the literal form (no matched operator exists)"}
+  weak_sigma_divisor: {value: 3, prov: placeholder, ref: "§8.3", note: "IMP-053; Gaussian test-function sigma = half support / this (the document says only 'Gaussian-window')"}
+  subtraction_form: {value: "matched", prov: placeholder, ref: "§8.3", note: "IMP-053; 'matched' smooths the base prediction with the same test function phi as the derivative; 'literal' subtracts it pointwise. The TV comparison always uses literal."}
+  tv_max_iter: {value: 50, prov: placeholder, ref: "§8.3", note: "IMP-054; lagged-diffusivity iterations"}
+  tv_tol: {value: 1.0e-3, prov: placeholder, ref: "§8.3", note: "IMP-054; relative change of the derivative that stops the iteration"}
+  tv_eps: {value: 1.0e-6, prov: placeholder, ref: "§8.3", note: "IMP-054; smoothing of |x| in the TV term, in scaled units"}
+  input_names: {value: [u_tgt, u_src, S_src], prov: locked, ref: "§8.2", note: "IMP-055; z-scored base inputs; the three pairwise products are formed from the z-scored columns and get no constants of their own"}
   target_state: {value: "y4 (velocity of the excitatory PSP onto pyramidal cells)", prov: locked, ref: "§8.3"}
   one_shared_equation_both_nodes: {value: true, prov: locked, ref: "§8.4"}
   pysr_loss: {value: "ordinary mean squared error", prov: locked, ref: "§8.3", note: "no custom weak-form loss"}
@@ -350,6 +356,10 @@ pysr:
   serial_only_for_pilot_determinism_checks: {value: true, prov: locked, ref: "§8.2"}
   turbo: {value: false, prov: placeholder, ref: "§8.2, §16.5.2", note: "try True only after the pilot Pareto-front check"}
   warm_session: {value: true, prov: locked, ref: "§8.2, §16.5.1"}
+  seeds:
+    fold_offset: {value: 2000, prov: placeholder, ref: "§8.2, IMP-056", note: "added to the split seed; fit/validation subject partition"}
+    random_state_offset: {value: 4000, prov: placeholder, ref: "§8.2, IMP-056", note: "added to the split seed; PySR random_state (used in D2)"}
+    refit_stride: {value: 100, prov: placeholder, ref: "§8.2, IMP-056", note: "refit k adds stride x k to every offset; the primary fit is k = 0"}
   selection:
     fit_fraction: {value: 0.8, prov: locked, ref: "§8.2"}
     validation_fraction: {value: 0.2, prov: locked, ref: "§8.2"}
@@ -361,7 +371,7 @@ pysr:
     rows_per_fit: {value: 50000, prov: placeholder, ref: "§8.2"}
     rows_validation: {value: 50000, prov: placeholder, ref: "§8.2"}
     equal_rows_per_subject: {value: true, prov: locked, ref: "§8.2"}
-    seed: {value: null, prov: unset, ref: "§8.2", note: "doc says fixed recorded seed, gives no value"}
+    seed: {value: 3000, prov: placeholder, ref: "§8.2", note: "IMP-056; OFFSET added to the split seed (and 100 x refit index); the subsample draw is default_rng([seed, stream]), stream 0 = fit, 1 = validation"}
   ensemble:
     n_refits: {value: 25, prov: locked, ref: "§8.2"}
     subject_fraction: {value: 0.5, prov: locked, ref: "§8.2"}
@@ -481,7 +491,7 @@ compute:
 open_questions_for_implementation:
   - "rescaling.reference_simulation: seed, burn-in, single node vs two-node at g=0, integrator, noise redraw interval (PLAN.md A4)"
   # decided in IMP-009 (now placeholders): bad_channel.flatline_threshold, bad_channel.saturation_min_run_s, line_noise.notch_q
-  - "residual.tv_weight_grid: the 5 values"
-  - "pysr.subsample.seed, g0.seeds, aaft.seed: seed values"
+  # decided in IMP-054 (residual.tv_weight_grid) and IMP-056 (pysr.subsample.seed and pysr.seeds)
+  - "g0.seeds, aaft.seed: seed values"
   - "pysr.version: exact version to pin at setup"
   - "ukf.numba.enabled: decided by the pilot validation (§21.2 #4)"

@@ -288,19 +288,25 @@ Note (2026-09-30): done; tools/c8_gain_prior_diagnostic.py, tests/test_c8_gain_p
 
 ## Stage D: Regression machinery (regression.py)
 
-### [ ] D1. Derivative estimators
+Session split (2026-09-30): the session's 'D1' commit holds PLAN steps D1, D2 and D4 and the bookkeeping part of D5 (no Julia); the session's 'D2' (PySR install, smoke checks, determinism and turbo check, PySR recovery test, pilot 3-refit mechanics on synthetic rows) holds PLAN step D3 and the fitting part of D5.
+
+### [x] D1. Derivative estimators
 Read: §8.3.
 Done when:
 - The weak-form estimator (Gaussian-window test function with compact support; 60, 100 and 160 ms options) is implemented.
 - The TV baseline with its 5-value grid is implemented.
 - Both are tested against analytic signals.
 
-### [ ] D2. Residual target and rows
+Note (2026-09-30): done; src/regression.py (new), tests/test_regression.py, tests/planted_sim.py (test-only simulator with the planted product), tools/d1_estimator_report.py, config residual.* leaves, IMP-053, IMP-054. Weak form: sigma = h/3, phi = g - g(h), K = 7 / 12 / 20 taps at 60 / 100 / 160 ms; matched and literal subtraction both implemented (config residual.subtraction_form, default matched by the user's decision); TV by lagged diffusivity on the approved 5-value grid. Finding for the pilot (IMP-053): on the noise-free simulator the matched form shrinks the recovered coefficient (c_hat / c_true 0.89 / 0.69 / 0.36) and the literal form does not (1.07 / 1.11 / 1.14); TV costs about 0.9 s per window.
+
+### [x] D2. Residual target and rows
 Read: §8.2 (inputs, z-scoring), §8.3, §8.4.
 Done when:
 - The residual is dy₄/dt minus the base-model prediction at the recording-level gains.
 - Rows come from the 2-s windows after burn-in, with both directions pooled.
 - z-scoring uses the fit fold's mean and SD, and those constants are stored.
+
+Note (2026-09-30): done in the same commit; window_rows / recording_rows / fit_zscore / design, IMP-055. Rows lose K samples at each end of a window (360 per window and node at 100 ms, not 384); only x_smooth[:, :12] is read, so the DEV-005 layout decision does not matter here.
 
 ### [ ] D3. PySR wrapper
 Read: §8.2, §16.5.
@@ -312,7 +318,7 @@ Done when:
 - PySR's batching option is not used.
 - turbo stays off until verified.
 
-### [ ] D4. Pareto selection and term signatures
+### [x] D4. Pareto selection and term signatures
 Read: §8.2, §8.4.
 Done when:
 - The split is 80/20 by subject. For G0 it is the last 20% of windows.
@@ -320,9 +326,13 @@ Done when:
 - A bare constant counts as "no term".
 - The sympy signature tests pass: tanh(1.02·x + 0.01) → tanh(x), and denominators are kept literally.
 
+Note (2026-09-30): done in the same commit (selection on stubbed fronts; PySR itself not yet run); IMP-056 to IMP-058. sympy 1.14.0 installed in .venv (pin at Stage L).
+
 ### [ ] D5. Refit ensemble
 Read: §8.2, §15 (C2).
 Done when 25 half-sample refits at 600 s each run with the same selection rule.
+
+Note (2026-09-30): the subject draws, seeds and the recurrence count exist (draw_ensemble, signature_recurrence, IMP-056, IMP-058); the refits themselves need PySR (session D2).
 
 ---
 
