@@ -263,8 +263,21 @@ def _first_divergence(x_post, P_post, cfg, center, sd, min_eig, check_state=True
     return None
 
 
-def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False):
+def use_numba(cfg, backend=None):
+    """backend "numba" / "numpy" force a path; None follows ukf.numba.enabled (null or false: NumPy, the
+    reference and the default until the C5 validation is accepted, IMP-044)."""
+    if backend is None:
+        return bool(cfg["ukf"]["numba"]["enabled"])
+    if backend not in ("numba", "numpy"):
+        raise UKFError(f"backend must be 'numba', 'numpy' or None, got {backend!r}")
+    return backend == "numba"
+
+
+def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False, backend=None):
     """Forward UKF over one segment z of shape (T, 2), in rescaled mV.
+
+    backend selects the implementation (see use_numba); this function is the NumPy reference and the oracle
+    of src/ukf_numba.py.
 
     Predict then update for every sample, the first included (IMP-020). Stops at the first
     diverged step (IMP-021). After every update the newest buffer entry is replaced by S of
@@ -273,6 +286,9 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
     z = np.asarray(z, dtype=np.float64)
     if z.ndim != 2 or z.shape[1] != ss.N_NODES:
         raise UKFError(f"z must have shape (T, {ss.N_NODES}), got {z.shape}")
+    if use_numba(cfg, backend):
+        from src import ukf_numba
+        return ukf_numba.run_filter(z, cfg, layout, q, x0=x0, P0=P0, buffer=buffer, keep_cov=keep_cov)
     T, n = z.shape[0], layout.n
     d_x0, d_P0, d_buf = initial_state(layout, cfg)
     x0 = d_x0 if x0 is None else np.asarray(x0, dtype=np.float64)
@@ -334,7 +350,7 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
     return res
 
 
-def run_smoother(result, cfg):
+def run_smoother(result, cfg, backend=None):
     """Unscented RTS over the completed steps of a forward run with keep_cov=True.
 
     Each backward step propagates with a copy of the forward buffer as it stood at the start
@@ -343,6 +359,9 @@ def run_smoother(result, cfg):
     """
     if result.P is None:
         raise UKFError("run_filter was called without keep_cov=True")
+    if use_numba(cfg, backend):
+        from src import ukf_numba
+        return ukf_numba.run_smoother(result, cfg)
     n_done = result.n_done
     layout = result.layout
     xs, Ps = result.x[:n_done], result.P[:n_done]

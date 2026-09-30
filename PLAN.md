@@ -249,7 +249,7 @@ Done when: tools/c4d_aperiodic_diagnostic.py runs the six C4b synthetic series a
 
 Note (2026-09-30): done; script only, no src, config or rule change, nothing under outputs/, results not committed as findings. Headline (6 synthetic series, pilot values from C4b/C4c): S1 reproduces the real-data pattern at q = 1e-2 (y1 beyond 10 SD 0.038 against 0.021 real, max 25.5 SD against 27, p excursion 17 prior SD against 21, NIS 2.56 against 2.06); S0 does not (0.000, 5.8 SD, 0.9 prior SD, 1.82); the spectra match the real slope (S1 -1.58, real -1.58) with a higher alpha share (0.47 against 0.39 real median); at q = 1e-3 the real recordings lie between S1 and S2. Real filtered y1 and y2 are positively correlated (0.6 to 0.73) but there is no synthetic baseline for that correlation. No rule change was implemented; the decision is open.
 
-### [ ] C5. Numba port and validation (§21.2 #4)
+### [x] C5. Numba port and validation (§21.2 #4)
 Note (C2c, c): time the divergence-reference refresh in the C5 benchmark. It runs on about 11 to 14 percent of steps (3 to 8 ms per fixed-point solve, pure Python around model.steady_state); it is not part of the Numba port yet.
 Read: §7.5, §16.5.2.
 Done when:
@@ -258,6 +258,8 @@ Done when:
 - Downstream statistics are unchanged.
 - A timing comparison is reported.
 - The fallback path to filterpy exists.
+
+Note (2026-09-30): done; src/ukf_numba.py (new), tests/test_ukf_numba.py (37 tests), backend argument in ukf.run_filter/run_smoother, config ukf.numba.enabled false (placeholder, default stays NumPy) and rtol/atol_smoothed_cov, IMP-044 to IMP-050, DEV-004 (smoothed covariances only: rtol 1e-6, atol 1e-8; everything else and all downstream statistics stay at rtol 1e-8, atol 1e-10). filterpy's Cholesky convention (scipy.linalg.cholesky default, upper, 'U'*U = (n + kappa) P', rows of U) confirmed from the installed 1.4.5 source. Speed-up on 60,000 samples, one core: forward 3.02 s against 68.8 s (23x), smoother 2.77 s against 62.5 s (23x), pass 1 forward-only 3.1 s against 60.8 s (20x), full pass 1 5.96 s against 134.6 s (23x), pass 2 3.6 s against 86.8 s (24x). The reference tracker (fixed-point solve) was ported too: 361 refreshes at 0.85 ms = 9.6% of the run (Python would be 58%). cache=True works on Windows (fresh-process warm-up 1.4 s; first compile about 8.6 s + 2.4 s); stale-entry caveat when only model.py changes (IMP-048). Mutation checks (Cholesky orientation, dropped covariance centre weight, wrong buffer entry replaced, fastmath=True) each fail a test; restored file byte-identical (cmp). The pilot still decides whether ukf.numba.enabled becomes true (§21.2 #4).
 
 ---
 

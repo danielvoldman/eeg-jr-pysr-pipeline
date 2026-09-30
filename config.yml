@@ -292,9 +292,11 @@ ukf:
     fixed_point_fd_step: {value: 1.0e-6, prov: placeholder, ref: "§7.5, IMP-029", note: "finite-difference step for the 2 x 2 Newton Jacobian"}
   parameter_estimate_from_smoothed_mean_after_burn_in: {value: true, prov: locked, ref: "§7.5"}
   numba:
-    enabled: {value: null, prov: unset, ref: "§7.5, §21.2 #4", note: "decided by the pilot validation"}
+    enabled: {value: false, prov: placeholder, ref: "§7.5, §21.2 #4", note: "IMP-044; false = the NumPy reference (default) until the C5 validation is accepted; ukf.run_filter(backend=...) overrides"}
     rtol: {value: 1.0e-8, prov: placeholder, ref: "§7.5"}
     atol: {value: 1.0e-10, prov: placeholder, ref: "§7.5"}
+    rtol_smoothed_cov: {value: 1.0e-6, prov: placeholder, ref: "§7.5, DEV-004", note: "smoothed covariances only (predicted-covariance condition number about 1e8); every other quantity uses rtol"}
+    atol_smoothed_cov: {value: 1.0e-8, prov: placeholder, ref: "§7.5, DEV-004", note: "smoothed covariances only; every other quantity uses atol"}
     fastmath: {value: false, prov: locked, ref: "§7.5"}
     dtype: {value: "float64", prov: locked, ref: "§7.5, §16.5.2"}
     cholesky_convention: {value: "upper-triangular (SciPy default); rows of U are sigma-point offsets", prov: locked, ref: "§7.5", note: "verify against installed filterpy source"}
