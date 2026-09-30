@@ -163,7 +163,7 @@ Note (2026-09-29): done. Rules applied per recording in this order: units check,
 
 Stage C is closed. C1 to C5 are build steps. C4b, C4c, C4d, C6, C7 and C8 are read-only DIAGNOSTICS (no src or config change, nothing adopted): C4b d48d906, C4c e3db3fc, C4d c959251, C6 f40fd8d, C7 d5b32f6, C8 4b134fd. Their combined finding is DEV-005 (status OPEN, not adopted).
 
-**GATE: DEV-005 decision.** Before Stage E (G0 synthetic gate) and before the pilot (Stage I) is run, the DEV-005 decision (adopt candidate A or B, keep the 19-D filter and accept a possible G0 failure under §20, or change the state-SD rule) must be made and logged in DEVIATIONS.md, on pilot and G0 evidence only. Until then no G0 or pilot run starts.
+**GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked. Stages D to H (build steps) are not blocked.
 
 Note: Before any phase >= 2 gets a real runner: check_prerequisite must also read outputs/gate.json and carry any low_confidence flag forward (CLAUDE.md rule 6, §18.1). Add tqdm progress bars when phases have real work (§18).
 
@@ -328,7 +328,7 @@ Done when 25 half-sample refits at 600 s each run with the same selection rule.
 
 ## Stage E: Synthetic gate (synthetic_gate.py)
 
-**GATE: the DEV-005 decision (Stage C) must be logged before this stage starts.**
+**GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked.
 
 ### [ ] E1. Operating-regime grid
 Read: §9.1.
@@ -442,7 +442,7 @@ Done when:
 
 ## Stage I: Pilot (§17)
 
-**GATE: the DEV-005 decision (Stage C) must be logged before this stage starts.**
+**GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked.
 
 - [ ] Before the pilot, compute the exact observed ICC that corresponds to a CI lower bound of 0.40 at n = 42 (§15, C3).
 - [ ] Before the pilot, run the binomial check for any "X% of subjects" criterion at n = 33 (§11.5).
