@@ -237,6 +237,12 @@ Done when: tools/c4b_divergence_diagnostic.py runs on the 12 pilot recordings (s
 
 Note (2026-09-30): done; script only, no src or config change, no rule or threshold changed, nothing written under outputs/, results not committed as findings (the tables were reported in the session). The flag is disabled by replacing ukf._first_divergence in the script's own worker processes (NaN/Inf and PD checks stay on). Headline (pilot only, 12 recordings): no NaN/Inf/PD failure in 72 runs; only the y1 states exceed 10 SD (up to 39.5 SD at q = 1e-2, against 15 on synthetic); mean NIS at q = 1e-2 is 1.39 to 2.84 with the flag off; filtered p, log rho and gains run 9 to 26 prior SD from the prior at q >= 1e-3, against 0.8 to 3.5 on synthetic. No option (a) to (d) was implemented; the decision is open.
 
+### [x] C4c. Read-only diagnostic: parameter freedom versus the y1 excursions
+Read: §7.5; DEV-003, IMP-021, IMP-026, IMP-029, IMP-037 to IMP-043; tools/c4b_divergence_diagnostic.py.
+Done when: tools/c4c_parameter_freedom_diagnostic.py runs the 12 pilot recordings (ses-t1) at q = 1e-2 and 1e-3 under V0 baseline, V1 parameters frozen at the prior, V2 random-walk factor x0.1, V3 x10 (all applied inside the script's own processes), with the state-SD flag disabled, and prints the y1 exceedance, parameter excursion, NIS, y1 posterior-SD and spectrum tables.
+
+Note (2026-09-30): done; script only, no src, config or rule change, nothing under outputs/, results not committed as findings. Headline (pilot only, 12 recordings): freezing the parameters (V1) removes most of the >10 SD exceedance at q = 1e-2 (median 0.021 to 0.003) but the y1 excursions reach 62 SD and the median NIS rises from 2.06 to 3.26; the slower walk (V2) changes little and the faster walk (V3) lowers the exceedance (0.008) while parameters move further (up to 56 prior SD); the y1 posterior SD is about the prior SD (0.9 to 1.3 x) and a 10 posterior-SD test would still flag 5212 of 1,363,200 (sample, node) pairs (rule: 25,895); at the median filtered parameters the model output has a flatter aperiodic slope (-0.8 to -1.0) than the observed channel (-1.6 to -1.7). No rule change was implemented; the decision is open.
+
 ### [ ] C5. Numba port and validation (§21.2 #4)
 Note (C2c, c): time the divergence-reference refresh in the C5 benchmark. It runs on about 11 to 14 percent of steps (3 to 8 ms per fixed-point solve, pure Python around model.steady_state); it is not part of the Numba port yet.
 Read: §7.5, §16.5.2.
