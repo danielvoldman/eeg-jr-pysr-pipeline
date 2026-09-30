@@ -243,6 +243,12 @@ Done when: tools/c4c_parameter_freedom_diagnostic.py runs the 12 pilot recording
 
 Note (2026-09-30): done; script only, no src, config or rule change, nothing under outputs/, results not committed as findings. Headline (pilot only, 12 recordings): freezing the parameters (V1) removes most of the >10 SD exceedance at q = 1e-2 (median 0.021 to 0.003) but the y1 excursions reach 62 SD and the median NIS rises from 2.06 to 3.26; the slower walk (V2) changes little and the faster walk (V3) lowers the exceedance (0.008) while parameters move further (up to 56 prior SD); the y1 posterior SD is about the prior SD (0.9 to 1.3 x) and a 10 posterior-SD test would still flag 5212 of 1,363,200 (sample, node) pairs (rule: 25,895); at the median filtered parameters the model output has a flatter aperiodic slope (-0.8 to -1.0) than the observed channel (-1.6 to -1.7). No rule change was implemented; the decision is open.
 
+### [x] C4d. Read-only diagnostic on synthetic data: does 1/f background reproduce the real-data behaviour?
+Read: §7.5; DEV-003, IMP-026, IMP-029; tools/c4b_*, tools/c4c_*, tests/sim_data.py.
+Done when: tools/c4d_aperiodic_diagnostic.py runs the six C4b synthetic series as S0 plain, S1 + 1/f (slope -1.6, 50% of the 1-45 Hz variance) and S2 (80%), the noise added before the band-pass and the rescaling, at q = 1e-2 and 1e-3 with the state-SD flag disabled, and prints the exceedance, parameter excursion, NIS and spectrum tables plus the y1/y2 correlation of 3 pilot recordings.
+
+Note (2026-09-30): done; script only, no src, config or rule change, nothing under outputs/, results not committed as findings. Headline (6 synthetic series, pilot values from C4b/C4c): S1 reproduces the real-data pattern at q = 1e-2 (y1 beyond 10 SD 0.038 against 0.021 real, max 25.5 SD against 27, p excursion 17 prior SD against 21, NIS 2.56 against 2.06); S0 does not (0.000, 5.8 SD, 0.9 prior SD, 1.82); the spectra match the real slope (S1 -1.58, real -1.58) with a higher alpha share (0.47 against 0.39 real median); at q = 1e-3 the real recordings lie between S1 and S2. Real filtered y1 and y2 are positively correlated (0.6 to 0.73) but there is no synthetic baseline for that correlation. No rule change was implemented; the decision is open.
+
 ### [ ] C5. Numba port and validation (§21.2 #4)
 Note (C2c, c): time the divergence-reference refresh in the C5 benchmark. It runs on about 11 to 14 percent of steps (3 to 8 ms per fixed-point solve, pure Python around model.steady_state); it is not part of the Numba port yet.
 Read: §7.5, §16.5.2.
