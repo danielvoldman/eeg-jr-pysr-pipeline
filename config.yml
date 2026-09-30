@@ -269,6 +269,12 @@ ukf:
     nis_target: {value: 2, prov: locked, ref: "§7.5"}
     n_tuning_subjects: {value: 20, prov: placeholder, ref: "§7.6", note: "random training subjects, per split seed"}
     g0_tuning_series: {value: 20, prov: locked, ref: "§7.5, §9.4"}
+    draw_seed_offset: {value: 1000, prov: placeholder, ref: "§7.6, IMP-042", note: "draw rng = default_rng(offset + split seed) on the sorted training IDs; offset so the stream differs from the split draw"}
+    nis_band: {value: 0.5, prov: placeholder, ref: "§7.5, IMP-043", note: "in_band if |mean NIS - 2| <= band at the selected q; out of band is a flag (low_confidence_qr), not a stop"}
+    min_recordings: {value: 15, prov: placeholder, ref: "§7.5, IMP-039", note: "recordings usable at every q; fewer and the rule refuses to select"}
+    max_diverged_fraction_flag: {value: 0.25, prov: placeholder, ref: "§7.5, IMP-039", note: "a q at which more than this fraction of the recordings diverged is flagged"}
+    cache_subdir: {value: "qr_tuning", prov: placeholder, ref: "§18, IMP-041", note: "under paths.cache_dir; one file per (recording, q)"}
+    output_name_pattern: {value: "qr_{seed}.json", prov: placeholder, ref: "§18.1, IMP-042", note: "under paths.outputs_dir (pilot: paths.pilot_results_dir)"}
   initial_state:
     method: {value: "deterministic steady state at prior parameter means", prov: placeholder, ref: "§7.6"}
     covariance_sim_duration_s: {value: 600, prov: placeholder, ref: "§7.6", note: "per-state variance from a noise-driven simulation at literature parameters"}

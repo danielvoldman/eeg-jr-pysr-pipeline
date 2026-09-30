@@ -193,6 +193,7 @@ class FilterResult:
     snapshots: np.ndarray         # (T, delay + 1, 2) buffer at the start of each step
     layout: object
     q: float
+    P_last: object = None         # (n, n) filtered covariance of the last completed step (C4, IMP-040)
     n_done: int = 0
     diverged: bool = False
     divergence_step: object = None
@@ -317,6 +318,7 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
         res.nis[t] = float(filt.y @ filt.SI @ filt.y)
         if keep_cov:
             res.P[t] = filt.P
+        res.P_last = filt.P.copy()
         res.n_done = t + 1
     seen = res.min_eig[np.isfinite(res.min_eig)]      # completed steps plus the diverged one, if computed
     res.monitor = {

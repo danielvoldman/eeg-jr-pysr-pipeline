@@ -112,6 +112,8 @@ class SegmentPass1:
     x_smooth_params: object = None   # (n, n_params) smoothed parameter trajectory
     sd_smooth_params: object = None  # (n, n_params) smoothed posterior SD
     n_used: int = 0                  # post-burn-in samples entering the recording-level means
+    nis: object = None               # (n,) NIS per step (C4, IMP-040); None if the segment diverged
+    nis_keep: object = None          # (n,) bool: samples after both burn-ins (the C4 tuning samples)
 
 
 @dataclass
@@ -168,8 +170,12 @@ class RecordingResult:
 
 # ---- pass 1 -----------------------------------------------------------------------------------------
 
-def run_pass1(segments, starts, cfg, q, layout=None):
-    """Recording-level pass over the clean segments (§7.5). See the module docstring and IMP-030/031."""
+def run_pass1(segments, starts, cfg, q, layout=None, forward_only=False):
+    """Recording-level pass over the clean segments (§7.5). See the module docstring and IMP-030/031.
+
+    forward_only=True (C4, IMP-040) skips the smoother and the stored covariances: params is None, the
+    parameter carry and the divergence rule are unchanged, and each segment carries its NIS and the mask
+    of samples after both burn-ins. The default is unchanged."""
     _check_inputs(segments, starts)
     layout = ss.make_layout(cfg) if layout is None else layout
     if layout.fixed_params is not None:
@@ -207,7 +213,7 @@ def run_pass1(segments, starts, cfg, q, layout=None):
             x0[n_neural:] = carry_x
             P0[n_neural:, n_neural:] = carry_P + np.diag(walk * prior_var_par * gap_s)
             carry_in_mean, carry_in_var = carry_x.copy(), np.diag(P0)[n_neural:].copy()
-        res = ukf.run_filter(z, cfg, layout, q, x0=x0, P0=P0, keep_cov=True)
+        res = ukf.run_filter(z, cfg, layout, q, x0=x0, P0=P0, keep_cov=not forward_only)
         seg_res = SegmentPass1(index=k, start=int(start), n=T, diverged=res.diverged,
                                reason=res.divergence_reason, step=res.divergence_step,
                                monitor=res.monitor, gap_s=gap_s, carry_in_mean=carry_in_mean,
@@ -218,16 +224,17 @@ def run_pass1(segments, starts, cfg, q, layout=None):
             log.warning("pass 1: segment %d (start %d, %d samples) diverged at step %s (%s); dropped",
                         k, start, T, res.divergence_step, res.divergence_reason)
             continue
-        xs, Ps = ukf.run_smoother(res, cfg)
-        seg_res.x_filt_params = res.x[:, n_neural:].copy()
-        seg_res.x_smooth_params = xs[:, n_neural:].copy()
-        seg_res.sd_smooth_params = np.sqrt(np.einsum("tii->ti", Ps[:, n_neural:, n_neural:]))
+        if not forward_only:
+            xs, Ps = ukf.run_smoother(res, cfg)
+            seg_res.x_filt_params = res.x[:, n_neural:].copy()
+            seg_res.x_smooth_params = xs[:, n_neural:].copy()
+            seg_res.sd_smooth_params = np.sqrt(np.einsum("tii->ti", Ps[:, n_neural:, n_neural:]))
         carry_x = res.x[-1, n_neural:].copy()
-        carry_P = res.P[-1][n_neural:, n_neural:].copy()
+        carry_P = (res.P_last if forward_only else res.P[-1])[n_neural:, n_neural:].copy()
         seg_res.carry_out_mean, seg_res.carry_out_var = carry_x.copy(), np.diag(carry_P).copy()
         last_end = int(start) + T
 
-        if T > burn:                                          # smoothed means over post-burn-in samples
+        if not forward_only and T > burn:                     # smoothed means over post-burn-in samples
             q_s = layout.params(xs[burn:])
             m_col = q_s["m"]
             for key in ss.PARAM_NAMES_FULL:
@@ -238,9 +245,11 @@ def run_pass1(segments, starts, cfg, q, layout=None):
                 sd_sums[name] += float(np.sum(seg_res.sd_smooth_params[burn:, i]))
             seg_res.n_used = T - burn
             n_used += T - burn
+        cum = processed + np.arange(T)
+        keep = (np.arange(T) >= burn) & (cum >= est_burn)     # samples after both burn-ins
+        if forward_only:                                      # only the tuning path reads them (C4)
+            seg_res.nis, seg_res.nis_keep = res.nis.copy(), keep
         if layout.include_gains:                              # filtered gains after both burn-ins
-            cum = processed + np.arange(T)
-            keep = (np.arange(T) >= burn) & (cum >= est_burn)
             if keep.any():
                 q_f = layout.params(res.x[keep])
                 gain_sums["g12"] += float(np.sum(q_f["g12"]))
