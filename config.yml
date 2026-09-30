@@ -339,7 +339,20 @@ residual:
 
 # ---------------------------------------------------------------- PySR (§8.2, §16.5)
 pysr:
-  version: {value: null, prov: unset, ref: "§8.2", note: "pin the exact version at setup and mirror it in requirements.txt"}
+  version: {value: {pysr: "2.6.0", symbolic_regression_jl: "2.5.1", julia: "1.11.9", juliacall: "0.9.36", juliapkg: "0.1.27"}, prov: locked, ref: "§8.2", note: "IMP-059; pinned 2026-09-30 at setup (the first pip-resolvable release for Python 3.12); Julia 1.11.9 installed by juliapkg under .venv/julia_env/pyjuliapkg/install (not the WindowsApps shim), depot .venv/julia_depot; mirror in requirements.txt at Stage L"}
+  julia_depot_dir: {value: ".venv/julia_depot", prov: placeholder, ref: "§16.2, IMP-059", note: "JULIA_DEPOT_PATH, relative to the repo root; set by load_pysr before juliacall is imported"}
+  parallelism: {value: "multithreading", prov: placeholder, ref: "§8.2, IMP-059", note: "procs only acts in multiprocessing mode; in multithreading the Julia thread count (PYTHON_JULIACALL_THREADS = 8) is the worker count"}
+  precision: {value: 64, prov: locked, ref: "§16.5.3, CLAUDE.md rule 4", note: "PySR's default is 32 (float32 is excluded anywhere in the pipeline)"}
+  niterations_timeout_bound: {value: 1000000, prov: placeholder, ref: "§8.2, IMP-059", note: "large, so the timeout is the stopping rule as section 8.2 states the budgets"}
+  maxsize: {value: 30, prov: placeholder, ref: "§8.2, IMP-059", note: "PySR default, written down"}
+  verbosity: {value: 0, prov: placeholder, ref: "IMP-059"}
+  output_dir: {value: "cache/pysr", prov: placeholder, ref: "§18, IMP-059", note: "PySR's equation files; cache/ is git-ignored"}
+  determinism_check:
+    n_rows: {value: 2000, prov: placeholder, ref: "§6, §8.2, IMP-060"}
+    niterations: {value: 8, prov: placeholder, ref: "§8.2, IMP-060", note: "fixed iterations, no timeout"}
+    seeds: {value: [11, 12, 13], prov: placeholder, ref: "§16.5.2, IMP-060", note: "turbo on/off comparison"}
+    loss_rtol: {value: 1.0e-6, prov: placeholder, ref: "§16.5.2, IMP-060", note: "the document gives no tolerance for 'the same Pareto front'"}
+    constant_sig_figs: {value: 4, prov: placeholder, ref: "§16.5.2, IMP-060"}
   binary_operators: {value: ["+", "-", "*", "/"], prov: placeholder, ref: "§8.2"}
   unary_operators: {value: [tanh, exp], prov: placeholder, ref: "§8.2"}
   candidate_inputs: {value: "normalized pyramidal potentials of target (t) and source (t-d), S of the source potential at t-d, pairwise products", prov: placeholder, ref: "§8.2"}

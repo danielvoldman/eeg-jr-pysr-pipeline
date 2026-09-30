@@ -297,7 +297,7 @@ Done when:
 - The TV baseline with its 5-value grid is implemented.
 - Both are tested against analytic signals.
 
-Note (2026-09-30): done; src/regression.py (new), tests/test_regression.py, tests/planted_sim.py (test-only simulator with the planted product), tools/d1_estimator_report.py, config residual.* leaves, IMP-053, IMP-054. Weak form: sigma = h/3, phi = g - g(h), K = 7 / 12 / 20 taps at 60 / 100 / 160 ms; matched and literal subtraction both implemented (config residual.subtraction_form, default matched by the user's decision); TV by lagged diffusivity on the approved 5-value grid. Finding for the pilot (IMP-053): on the noise-free simulator the matched form shrinks the recovered coefficient (c_hat / c_true 0.89 / 0.69 / 0.36) and the literal form does not (1.07 / 1.11 / 1.14); TV costs about 0.9 s per window.
+Note (2026-09-30): done; src/regression.py (new), tests/test_regression.py, tests/planted_sim.py (test-only simulator with the planted product), tools/d1_estimator_report.py, config residual.* leaves, IMP-053, IMP-054. Weak form: sigma = h/3, phi = g - g(h), K = 7 / 12 / 20 taps at 60 / 100 / 160 ms; matched and literal subtraction both implemented (config residual.subtraction_form, default matched by the user's decision); TV by lagged diffusivity on the approved 5-value grid. OPEN CHOICE for Stage I (user, 2026-09-30): matched (M, default) versus literal (L) subtraction is decided on FILTERED states at the pilot, not on the D1 numbers (noise-free test simulator: M shrinks the recovered coefficient, c_hat / c_true 0.89 / 0.69 / 0.36 at 60 / 100 / 160 ms, L 1.07 / 1.11 / 1.14; these are mechanics, not findings; IMP-053). M with smoothed inputs is not to be implemented. TV is for the pilot set only (about 0.9 s per window).
 
 ### [x] D2. Residual target and rows
 Read: §8.2 (inputs, z-scoring), §8.3, §8.4.
@@ -308,7 +308,7 @@ Done when:
 
 Note (2026-09-30): done in the same commit; window_rows / recording_rows / fit_zscore / design, IMP-055. Rows lose K samples at each end of a window (360 per window and node at 100 ms, not 384); only x_smooth[:, :12] is read, so the DEV-005 layout decision does not matter here.
 
-### [ ] D3. PySR wrapper
+### [x] D3. PySR wrapper
 Read: §8.2, §16.5.
 Done when:
 - The PySR version is pinned, and operators, inputs, parsimony and timeouts come from config.
@@ -317,6 +317,8 @@ Done when:
 - Each fit gets a 50,000-row subsample with equal rows per subject.
 - PySR's batching option is not used.
 - turbo stays off until verified.
+
+Note (2026-09-30): done; PySR 2.6.0, SymbolicRegression.jl 2.5.1, Julia 1.11.9 (installed by juliapkg under .venv/julia_env, depot .venv/julia_depot; pinned in config pysr.version), IMP-059 to IMP-062. src/regression.py: load_pysr, model_kwargs, fit_model, run_fit, front_entries, evaluate_equation, fronts_identical / fronts_equivalent; tools/d2_smoke.py, tools/d2_pysr_reports.py; tests/test_regression_pysr.py (marker pysr, excluded by default in pytest.ini: run with -m pysr). Checks: 8 Julia threads, both import orders, 30 s timeout overshoot 0.87 s on 5,000 rows (7 to 20 s at 50,000 rows), affinity masks honoured, smoke fit finds the product at complexity 3, float64 costs 1.6x float32, serial turbo-off run bitwise repeatable, turbo on/off NOT equivalent on 3 of 3 seeds (1.5 to 1.8x faster): turbo stays false.
 
 ### [x] D4. Pareto selection and term signatures
 Read: §8.2, §8.4.
@@ -328,15 +330,17 @@ Done when:
 
 Note (2026-09-30): done in the same commit (selection on stubbed fronts; PySR itself not yet run); IMP-056 to IMP-058. sympy 1.14.0 installed in .venv (pin at Stage L).
 
-### [ ] D5. Refit ensemble
+### [x] D5. Refit ensemble
 Read: §8.2, §15 (C2).
 Done when 25 half-sample refits at 600 s each run with the same selection rule.
 
-Note (2026-09-30): the subject draws, seeds and the recurrence count exist (draw_ensemble, signature_recurrence, IMP-056, IMP-058); the refits themselves need PySR (session D2).
+Note (2026-09-30): done in two parts. D1 commit: subject draws, seeds and the recurrence count (draw_ensemble, signature_recurrence, IMP-056, IMP-058). D2 commit: run_fit and run_ensemble with real PySR fits, mechanics checked on synthetic rows only (pilot: 3 refits at 600 s; pytest marker test with 25 s timeouts); the 25-refit ensemble itself (4.2 h) has not been run and needs real rows (Stage K). IMP-062.
 
 ---
 
 ## Stage E: Synthetic gate (synthetic_gate.py)
+
+Note (2026-09-30, from D2): the section 9.1 planted basis (potential / SD, NOT centred) has a mean of about 24 and an SD of about 12 in the test simulator, so after z-scoring the inputs it is mostly linear terms plus a product. When G0 recovery is scored, check that it is not trivially a linear term (the D2 marker test requires the product signature on an uncentred basis). No change to section 9.1.
 
 **GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked.
 

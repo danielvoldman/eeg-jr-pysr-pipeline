@@ -17,8 +17,12 @@ test-function derivative; 'matched' smooths the base prediction with the same te
 'literal' subtracts it pointwise (IMP-053). TV uses the literal form. Rows exist only where the whole
 kernel lies inside the kept samples of a window (no padding, nothing crosses a window edge).
 """
+import faulthandler
 import logging
 import math
+import os
+import sys
+import time
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import lru_cache
@@ -28,6 +32,7 @@ import sympy
 
 from src import model
 from src import passes
+from src.config import REPO_ROOT
 
 log = logging.getLogger(__name__)
 
@@ -570,3 +575,192 @@ def signature_recurrence(signature_sets, cfg):
             counts[sig] = counts.get(sig, 0) + 1
     return {"n_refits": n, "needed": need, "counts": counts,
             "stable": sorted(sig for sig, c in counts.items() if c >= need)}
+
+
+# ---- PySR wrapper (PLAN.md D3, D5; §8.2, §16.5; IMP-059, IMP-060) -------------------------------------------
+
+ROLE_TIMEOUT = {"primary": "timeout_primary_s", "refit": "timeout_refit_s",
+                "synthetic": "timeout_synthetic_s", "pilot_primary": "timeout_pilot_primary_s"}
+
+
+def load_pysr(cfg):
+    """Import PySR once per process and check the pins (§8.2: one warm Julia session for every fit).
+
+    PYTHON_JULIACALL_THREADS must already hold compute.julia_threads: Julia's thread count is fixed when
+    juliacall is first imported (main.py sets it from config before anything else). JULIA_DEPOT_PATH is
+    pointed at pysr.julia_depot_dir (inside .venv) unless the caller set it. Raises RegressionError if the
+    thread count, PySR version or Julia version is not the pinned one."""
+    want = str(cfg["compute"]["julia_threads"])
+    if "juliacall" not in sys.modules:
+        if os.environ.get("PYTHON_JULIACALL_THREADS") != want:
+            raise RegressionError(f"PYTHON_JULIACALL_THREADS must be {want} before PySR is imported "
+                                  f"(main.py sets it); it is {os.environ.get('PYTHON_JULIACALL_THREADS')!r}")
+        os.environ.setdefault("JULIA_DEPOT_PATH", str(REPO_ROOT / cfg["pysr"]["julia_depot_dir"]))
+    if faulthandler.is_enabled():
+        # Julia's GC safepoints are page faults that Windows reports as access violations; Python's
+        # faulthandler (pytest turns it on) prints each as a 'fatal exception' although Julia handles it
+        # and the run continues (IMP-059).
+        faulthandler.disable()
+        log.info("faulthandler disabled before PySR is imported (Julia safepoints raise access violations)")
+    import pysr
+    from juliacall import Main as jl
+    pins = cfg["pysr"]["version"]
+    n_threads = int(jl.seval("Threads.nthreads()"))
+    if n_threads != int(want):
+        raise RegressionError(f"Julia runs {n_threads} threads, expected {want}")
+    if pysr.__version__ != pins["pysr"]:
+        raise RegressionError(f"PySR {pysr.__version__} is installed, config pins {pins['pysr']}")
+    julia_version = str(jl.seval("string(VERSION)"))
+    if julia_version != pins["julia"]:
+        raise RegressionError(f"Julia {julia_version} runs, config pins {pins['julia']}")
+    return pysr
+
+
+def model_kwargs(cfg, role, *, random_state, serial=False, turbo=None, niterations=None, parsimony=None,
+                 timeout_s=None):
+    """PySRRegressor keyword arguments from config (§8.2). Populations, ncycles_per_iteration and fast_cycle
+    are not passed (PySR's defaults, §16.5.3); batching is passed as False because PySR 2 defaults it to
+    'auto'; precision is 64. serial=True is the determinism-check mode: one thread, deterministic, a fixed
+    niterations and no timeout. PySR 2 takes variable_names at fit(), not here (fit_model passes them)."""
+    pc = cfg["pysr"]
+    kw = dict(binary_operators=list(pc["binary_operators"]), unary_operators=list(pc["unary_operators"]),
+              maxsize=pc["maxsize"], parsimony=pc["parsimony_start"] if parsimony is None else parsimony,
+              batching=pc["batching"], precision=pc["precision"],
+              turbo=pc["turbo"] if turbo is None else turbo, random_state=int(random_state),
+              verbosity=pc["verbosity"], progress=False,
+              temp_equation_file=True, delete_tempfiles=True)
+    if serial:
+        if niterations is None:
+            raise RegressionError("serial mode needs a fixed niterations")
+        kw.update(parallelism="serial", deterministic=True, niterations=int(niterations),
+                  timeout_in_seconds=None)
+    else:
+        kw["parallelism"] = pc["parallelism"]
+        kw["niterations"] = pc["niterations_timeout_bound"] if niterations is None else int(niterations)
+        kw["timeout_in_seconds"] = float(pc[ROLE_TIMEOUT[role]] if timeout_s is None else timeout_s)
+        if pc["parallelism"] == "multiprocessing":
+            kw["procs"] = pc["procs"]
+    return kw
+
+
+def evaluate_equation(text, X, names=VARIABLE_NAMES):
+    """Value of a PySR equation string on the columns of X (float64, sympy lambdify; independent of PySR's
+    own predict). Overflow and invalid operations give inf / nan, which the selection treats as a failed
+    loss."""
+    expr = parse_equation(text)
+    fn = sympy.lambdify([sympy.Symbol(n) for n in names], expr, modules=["numpy"])
+    with np.errstate(all="ignore"):
+        out = fn(*[X[:, i] for i in range(len(names))])
+    return np.broadcast_to(np.asarray(out, dtype=np.float64), (X.shape[0],)).copy()
+
+
+def front_entries(equations, X_val, y_val, names=VARIABLE_NAMES):
+    """FrontEntry list from PySR's equations_ table (rows with complexity, loss, equation), each scored on
+    the validation rows by mean squared error of the z-scored target (non-finite gives inf)."""
+    out = []
+    for row in equations.itertuples():
+        pred = evaluate_equation(row.equation, X_val, names)
+        loss = float(np.mean((pred - y_val) ** 2))
+        out.append(FrontEntry(int(row.complexity), str(row.equation), float(row.loss),
+                              loss if math.isfinite(loss) else math.inf))
+    return out
+
+
+def fit_model(cfg, X, y, role, *, random_state, names=VARIABLE_NAMES, **kw):
+    """One PySR fit (a fresh PySRRegressor each time, the Julia session is warm). Returns (model, seconds)."""
+    pysr = load_pysr(cfg)
+    model_ = pysr.PySRRegressor(**model_kwargs(cfg, role, random_state=random_state, **kw))
+    t0 = time.time()
+    model_.fit(np.ascontiguousarray(X, dtype=np.float64), np.ascontiguousarray(y, dtype=np.float64),
+               variable_names=list(names))
+    return model_, time.time() - t0
+
+
+@dataclass
+class FitResult:
+    selection: object
+    entries: list
+    zscore: object
+    seeds: dict
+    n_fit_rows: int
+    n_val_rows: int
+    seconds: float
+    record: dict
+
+
+def run_fit(rows_by_subject, fit_ids, val_ids, split, split_seed, cfg, *, role, k=0, **kw):
+    """Fit on the fit fold's subsample, score the Pareto front on the validation subsample, select and
+    freeze (§8.2). Only training subjects are accepted (check_training_ids); no refit on 100%."""
+    check_training_ids(list(fit_ids) + list(val_ids), split)
+    sc = cfg["pysr"]["subsample"]
+    seeds = seeds_for(cfg, split_seed, k)
+    fit_rows = subsample_rows({s: rows_by_subject[s] for s in fit_ids}, sc["rows_per_fit"], seeds["subsample"], 0)
+    val_rows = subsample_rows({s: rows_by_subject[s] for s in val_ids}, sc["rows_validation"],
+                              seeds["subsample"], 1)
+    z = fit_zscore([rows_by_subject[s] for s in fit_ids])
+    Xf, yf = design(fit_rows, z)
+    Xv, yv = design(val_rows, z)
+    model_, secs = fit_model(cfg, Xf, yf, role, random_state=seeds["random_state"], names=VARIABLE_NAMES, **kw)
+    entries = front_entries(model_.equations_, Xv, yv)
+    sel = select_equation(entries, cfg)
+    chosen = sel.entry is not None and not sel.no_term
+    record = {"role": role, "k": k, "seeds": seeds, "versions": cfg["pysr"]["version"],
+              "turbo": cfg["pysr"]["turbo"] if kw.get("turbo") is None else kw["turbo"],
+              "precision": cfg["pysr"]["precision"], "fit_seconds": secs, "n_fit_rows": len(fit_rows),
+              "n_val_rows": len(val_rows), "fit_subjects": sorted(fit_ids), "val_subjects": sorted(val_ids),
+              "zscore": z.to_dict(), "no_term": sel.no_term, "reason": sel.reason,
+              "equation": sel.entry.equation if sel.entry is not None else None,
+              "complexity": sel.entry.complexity if sel.entry is not None else None,
+              "val_loss": sel.entry.val_loss if sel.entry is not None else None,
+              "min_val_loss": sel.min_val_loss,
+              "signatures": sorted(term_signatures(sel.entry.equation)) if chosen else [],
+              "front": [{"complexity": e.complexity, "equation": e.equation, "loss": e.loss,
+                         "val_loss": e.val_loss} for e in entries]}
+    return FitResult(sel, entries, z, seeds, len(fit_rows), len(val_rows), secs, record)
+
+
+def run_ensemble(rows_by_subject, train_ids, split, split_seed, cfg, *, n_refits=None, role="refit", **kw):
+    """The C2 refit ensemble (§8.2): n half-sample refits (25; the pilot passes 3), each with the same
+    selection rule, then the signature recurrence. Returns {"refits": [record], "recurrence": ...}."""
+    draws = draw_ensemble(train_ids, split, split_seed, cfg, n_refits=n_refits)
+    records, sig_sets = [], []
+    for d in draws:
+        res = run_fit(rows_by_subject, d["fit"], d["val"], split, split_seed, cfg, role=role, k=d["k"], **kw)
+        res.record["half_subjects"] = d["subjects"]
+        records.append(res.record)
+        sig_sets.append(frozenset(res.record["signatures"]))
+        log.info("refit %d: %s (complexity %s, no_term %s, %.0f s)", d["k"], res.record["equation"],
+                 res.record["complexity"], res.record["no_term"], res.seconds)
+    return {"refits": records, "recurrence": signature_recurrence(sig_sets, cfg)}
+
+
+# ---- determinism and turbo comparison (§8.2, §16.5.2) -------------------------------------------------------
+
+def _round_constants(text, sig_figs):
+    expr = parse_equation(text)
+    rep = {f: sympy.Float(float(f"{float(f):.{sig_figs}g}")) for f in expr.atoms(sympy.Float)}
+    return str(expr.xreplace(rep))
+
+
+def fronts_identical(a, b):
+    """Bitwise: the same equations, complexities and fit losses (tables with complexity, loss, equation)."""
+    return (len(a) == len(b)
+            and all(int(x.complexity) == int(y.complexity) and str(x.equation) == str(y.equation)
+                    and float(x.loss) == float(y.loss) for x, y in zip(a.itertuples(), b.itertuples())))
+
+
+def fronts_equivalent(a, b, cfg):
+    """The turbo pass definition (IMP-060): the same complexity sequence, the same sympy structure with
+    constants rounded to constant_sig_figs, and fit losses within loss_rtol."""
+    dc = cfg["pysr"]["determinism_check"]
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a.itertuples(), b.itertuples()):
+        if int(x.complexity) != int(y.complexity):
+            return False
+        if (_round_constants(str(x.equation), dc["constant_sig_figs"])
+                != _round_constants(str(y.equation), dc["constant_sig_figs"])):
+            return False
+        if not math.isclose(float(x.loss), float(y.loss), rel_tol=dc["loss_rtol"], abs_tol=0.0):
+            return False
+    return True
