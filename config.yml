@@ -520,6 +520,12 @@ split:
 baseline:
   var_order_range: {value: [1, 32], prov: locked, ref: "§13.1", note: "samples"}
   var_cv_folds: {value: 5, prov: locked, ref: "§13.1", note: "subject-wise, on training subjects"}
+  cv_seed: {value: 42, prov: placeholder, ref: "§13.1, IMP-076", note: "default_rng(seed) permutation of the sorted training IDs, np.array_split into var_cv_folds"}
+  pilot_internal_seed: {value: 42, prov: placeholder, ref: "§17, IMP-076", note: "default_rng(seed) permutation of the sorted pilot IDs; the first split.pilot_internal_split[0] are the mechanics training side"}
+  intercept: {value: true, prov: placeholder, ref: "§13.1, IMP-076", note: "one pooled intercept per channel, frozen for M0, re-fitted for M0b"}
+  cv_aggregation: {value: "per_subject_mean", prov: placeholder, ref: "§10.2, §13.1, IMP-076", note: "mean over subjects of each subject's held-out MSE on the scoring-mask samples; ties go to the smaller order"}
+  output_var_pattern: {value: "baseline_var_{seed}.json", prov: placeholder, ref: "§18.1, IMP-076", note: "under paths.outputs_dir (pilot: paths.pilot_results_dir)"}
+  output_scores_pattern: {value: "baseline_scores_{seed}.npz", prov: placeholder, ref: "§18.1, IMP-076", note: "per held-out recording: starts, lengths, mask, per-sample M0 and M0b squared errors"}
   M0_coefficients_pooled_and_frozen: {value: true, prov: locked, ref: "§13.1"}
   M0b_refit_per_test_recording: {value: true, prov: locked, ref: "§13.1", note: "secondary"}
   score_on_identical_samples: {value: true, prov: locked, ref: "§10.2"}

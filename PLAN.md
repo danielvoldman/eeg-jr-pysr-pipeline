@@ -411,12 +411,14 @@ Next steps: Stage F (baseline: F1 VAR baselines), Stage G (robustness and scorin
 ### [x] F0. Wire filter A and q_fixed into the real-data path (DEV-005, DEV-006, IMP-074)
 Done (2026-10-01): passes.run_pass1/run_pass2/run_recording and tuning.recording_nis/tune_q/run_real resolve the filter (explicit, else g0.filter = A) and q (explicit, else ukf.process_noise.q_fixed = 1e-2); "19D" only by explicit name and explicit q; A runs through ukf_ext.make_runners (no global patch); results carry filter_name, state_dim (21 / 14) and, per segment, z_pred and sq_err (for Stage G); tuning cache key has the filter name and ukf_ext.py; run_real reports the NIS rule as reported_not_used. DEV-006 written (state counts, M1 = 17 + 2 = 19-D, sigma points at n = 21, no per-seed real-data q re-tuning). Tests: tests/test_filter_golden.py (numbers pinned from c25886b), tests/test_filter_wiring.py (20), 11 mutation checks. Full suite 783 passed, 1 skipped, 3 deselected.
 
-### [ ] F1. VAR baselines
+### [x] F1. VAR baselines
 Read: §13, §10.2.
 Done when:
 - M0 has its order (1–32) chosen by 5-fold subject-wise cross-validation, with coefficients from pooled least squares, then frozen.
 - M0b is refitted on each test recording.
 - Both are scored on exactly the same samples as the UKF models.
+
+Note (2026-10-01): done. src/baseline.py (M0: order 1-32 by 5-fold subject-wise CV, pooled least squares by per-subject QR, one pooled intercept, frozen; M0b: refit per test recording), passes.scoring_mask (0.5 s per segment + 6 s cumulative, divergence-independent, the one mask both sides use), passes.subject_score, passes.filter_sq_errors (raises when a non-diverged segment has no error). Outputs: outputs/baseline_var_<seed>.json and outputs/baseline_scores_<seed>.npz (pilot: results/pilot/); driver baseline.run_baseline (gate unless --pilot; pilot 8/4 split mechanics only; not wired into main.py). IMP-075, IMP-076. tests/test_baseline.py.
 
 ---
 

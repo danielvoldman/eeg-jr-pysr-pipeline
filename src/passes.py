@@ -420,6 +420,51 @@ def run_recording(segments, starts, cfg, q=None, layout=None, filter_name=None):
     return RecordingResult(pass1=p1, pass2=p2, recording_diverged=flag)
 
 
+# ---- scoring (§10.2; F1, IMP-075) ---------------------------------------------------------------------------
+
+def scoring_mask(segment_lengths, cfg):
+    """Boolean mask per clean segment of the samples C1 scores, shared by the VAR baselines and the filter scorer (IMP-075).
+
+    Excluded: the first windows.training_burn_in_s of EVERY segment (the neural states are re-initialized there) and the
+    first passes.estimator_burn_in_s of the recording, counted in cumulative clean samples over ALL segments in order,
+    whether or not a filter diverged in them. The mask depends on the segment lengths only, never on a model. (run_pass1's
+    own nis_keep counts only non-diverged segments; the two coincide when nothing diverges.)"""
+    burn = _samples(cfg["windows"]["training_burn_in_s"], cfg)
+    est = _samples(cfg["passes"]["estimator_burn_in_s"], cfg)
+    out, cum = [], 0
+    for n in segment_lengths:
+        idx = np.arange(int(n))
+        out.append((idx >= burn) & (cum + idx >= est))
+        cum += int(n)
+    return out
+
+
+def filter_sq_errors(pass1):
+    """Per-segment one-step squared errors (mean over the two channels) of a pass-1 result: an array per segment, None for a
+    segment the filter dropped as diverged. RAISES if a non-diverged segment carries none: a scorer must never skip it."""
+    out = []
+    for s in pass1.segments:
+        if s.diverged:
+            out.append(None)
+        elif s.sq_err is None:
+            raise PassError(f"segment {s.index} is not diverged but carries no one-step squared error")
+        else:
+            out.append(s.sq_err)
+    return out
+
+
+def subject_score(sq_err, keep):
+    """One subject's score: the mean of the squared errors over the samples kept by `keep` (lists of per-segment arrays).
+    Raises if nothing is kept or a kept sample has no prediction (NaN): nothing is skipped silently."""
+    kept = [np.asarray(e, dtype=np.float64)[np.asarray(k, dtype=bool)] for e, k in zip(sq_err, keep)]
+    v = np.concatenate(kept) if kept else np.empty(0)
+    if v.size == 0:
+        raise PassError("no scored sample")
+    if not np.all(np.isfinite(v)):
+        raise PassError("a scored sample has no (finite) one-step error")
+    return float(np.mean(v))
+
+
 # ---- base model prediction for §8.3 (no residual, no derivative estimator here) -------------------------
 
 def base_dy4dt(x_smooth, s_delayed, params, cfg):
