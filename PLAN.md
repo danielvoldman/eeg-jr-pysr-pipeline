@@ -397,6 +397,9 @@ Question: is the E5 failure caused by the matched operating points or by the pip
 ### [x] E7. Zero-residual diagnostic (synthetic only, diagnostic)
 Question: does the planted product residual explain the remaining gain error? tools/e7_zero_residual_diagnostic.py (filters A and B only, 19D dropped; residual c = 0 inside the script; arms (i) the E6 fixed point and (ii) the E5 matched points; results/pilot/e7_zero_residual.json), tests/test_e7_zero_residual.py (8 tests, 9 mutation checks), IMP-072. No PySR, no gate.json, no DEV-005 decision.
 
+### [x] E8. Real pilot-data filter comparison (diagnostic, REAL pilot data)
+Question: how do 19D, A and B behave on the 12 real pilot recordings (ses-t1 only)? tools/e8_real_pilot_comparison.py (forward-only pass 1, Numba, q = 1e-2 and 1e-3, standard rule ON and state flag OFF inside the script; results/pilot/e8_real_pilot_comparison.json), tests/test_e8_real_pilot_comparison.py (11 tests, 13 mutation checks), IMP-073. The 19D numbers at q = 1e-2 reproduce C4b to C4d (y1 beyond 10 SD median 0.021, up to 39.5 SD, NIS median 2.06). No PySR, no gate.json, no src or config change, no DEV-005 decision.
+
 ---
 
 ## Stage F: Baseline (baseline.py)
