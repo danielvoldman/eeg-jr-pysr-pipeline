@@ -372,7 +372,7 @@ Done when:
 
 Note (2026-10-01): done; src/synthetic_gate.py (artifact_signal, blink_wave, emg_carrier, generate_series artifacts / arm artifact_null, preprocessing_gate_set, null_pass, preprocessing_bias_verdict, time_gate_series), tests/test_synthetic_gate_artifacts.py (20 tests, 9 mutation checks), config g0.preprocessing_gate.* leaves, IMP-066 (E2 review decisions) and IMP-067. Run `python -m src.synthetic_gate --time-gate-series --pilot`. One gate series takes about 1.5 to 1.8 s to generate and about 15 s with both passes (flag off); the 30%-of-SD EMG bursts are mostly not removed by the 5x screen (7 and 8 of 240 segments rejected). The PySR part of the bias verdict (NRMSE) and the series' estimates come in E4 / E5.
 
-### [ ] E4. Gate scoring and gate.json
+### [x] E4. Gate scoring and gate.json
 Read: §9.1–§9.4, §5.2, §18.1, §20.
 Note (C2b): the §9.3 identifiability check must report the posterior contraction of m. In observe() m is clipped to [0, 0.5] (IMP-016) and the prior spread (0.2 +- 0.66 at the sigma points) puts the two m-direction sigma points on the clip boundaries, so the filter sees less information about m; a poor contraction for m is a finding to log, not a reason to change the clip silently.
 Note (C2c, a): in the C2b coupled test (12 s, g12 = 12, g21 = 0, p = (220, 260)) the filter recovered g12 = 8.0 (smoothed 8.8), about 30 percent low, probably prior shrinkage toward 0 (prior SD 10.8, posterior SD 1.6). That is a likely risk for the G0 +/-15 percent gain-error criterion; look at it on the positive-control series before trusting that criterion.
@@ -383,6 +383,8 @@ Done when:
 - Contraction must be ≥ 50% (median).
 - Stability flags are set.
 - Null or stability failure means a hard stop. Positive-control or contraction failure sets `low_confidence`. Pilot mode never stops.
+
+Note (2026-10-01): done; src/ukf_ext.py (promoted copy of the C7 A and B filters, not adopted), src/synthetic_gate.py (gate_filters, filter_context, evaluate_series, tune_g0_q_option, positive / null / contraction / stability verdicts, gate_flags, gain_profile, choose_parsimony, linear_floor_nrmse, equation_nrmse, option_report, build_gate_document, write_gate), tests/test_ukf_ext.py (12) and tests/test_synthetic_gate_scoring.py (26), config ukf.aperiodic.*, g0.pass.from_level_index, g0.gate_schema_version, IMP-068 and IMP-069. Pass 2 for A and B is 14-D (no kernel change). 16 mutation checks, restored byte-identical. No PySR was run. The E5 driver supplies the PySR results (has_term, nrmse) and assembles the per-option documents.
 
 ### [ ] E5. Pilot driver and DEV-005 comparison report
 Read: §9.4, §17; DEV-005, IMP-063 onward.

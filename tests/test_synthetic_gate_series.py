@@ -291,7 +291,7 @@ def test_tuning_set_is_twenty_mid_level_series_from_its_own_block(world):
     assert not np.array_equal(ts[0].segments[0], pilot0.segments[0])
 
 
-def test_tune_g0_q_uses_the_numba_copy_and_refuses_other_filters(world, monkeypatch, tmp_path):
+def test_tune_g0_q_uses_the_numba_copy_and_routes_other_filters(world, monkeypatch, tmp_path):
     c, table, grid = world
     seen = {}
     from src import tuning
@@ -305,9 +305,11 @@ def test_tune_g0_q_uses_the_numba_copy_and_refuses_other_filters(world, monkeypa
     assert sg.tune_g0_q(c, series, "19D", n_jobs=1, min_recordings=3) == "result"
     assert seen["ids"] == ["tuning_0", "tuning_1", "tuning_2"] and seen["numba"] is True and seen["mr"] == 3
     assert CFG["ukf"]["numba"]["enabled"] is False and c["ukf"]["numba"]["enabled"] is False   # global switch untouched
-    for other in ("A", "B"):
-        with pytest.raises(sg.GateError):
-            sg.tune_g0_q(c, series, other)
+    called = []
+    monkeypatch.setattr(sg, "tune_g0_q_option", lambda cfg, ser, name, *a: called.append(name) or "option result")
+    for other in ("A", "B"):                                                   # E4: A and B go through the gate's own worker
+        assert sg.tune_g0_q(c, series, other) == "option result"
+    assert called == ["A", "B"]
 
 
 def test_tune_g0_q_real_run_returns_a_result_and_writes_no_qr_file(world, tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 """Synthetic gate G0 (PLAN.md Stage E; §5.2, §9, §18.1). This file holds E1 (the operating-regime grid), E2
-(series generator, Null A, Null B, the G0 tuning set) and E3 (the artifacts of the preprocessing gate and its bias
-scoring).
+(series generator, Null A, Null B, the G0 tuning set), E3 (the artifacts of the preprocessing gate and its bias
+scoring) and E4 (the filter option 19D / A / B, evaluation of a series, the scoring of §9.1 to §9.3, the flags and
+gate.json).
 
 E1 (§9.1, "operating regime matched to real data"): a grid of simulations over (p, input-noise SD, additive
 observation-noise level), 12 x 8 x 5 by default, each reduced to three SCALE-FREE features (alpha peak
@@ -26,6 +27,12 @@ positive arm draws them independently per channel, the artifact-only null (zero 
 channels with a 0-4 ms lag and a shared carrier. preprocessing_bias_verdict() scores the signed median bias of the gains
 and of the E/I ratio (p excluded).
 
+E4 (§9.1 to §9.3, §18.1): the filter is an OPTION (g0.filter_options 19D, A, B; ukf_ext is promoted, not adopted,
+IMP-068); gate_filters() lets a pilot run every option and makes a full run refuse while g0.filter is unset.
+evaluate_series() runs both passes with the standard divergence rule on (a diverged series is a failed series) and a
+flag-off pass 1 labelled diagnostic only; positive_verdict / null_arm_verdict / contraction_verdict /
+stability_verdict / gate_flags score; build_gate_document / write_gate produce gate.json (pilot: results/pilot only).
+
 Entry points: python -m src.synthetic_gate --grid-report --pilot
               python -m src.synthetic_gate --time-series --pilot
               python -m src.synthetic_gate --time-gate-series --pilot
@@ -36,6 +43,7 @@ import json
 import logging
 import sys
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -666,12 +674,12 @@ def tuning_set(cfg, grid, table, n=None, round_=0):
 
 
 def tune_g0_q(cfg, series, filter_name="19D", cache_dir=None, n_jobs=1, min_recordings=None):
-    """G0's own q by the section 7.5 NIS rule on the tuning set (tuning.tune_q, the real-data core). Returns the
-    QRResult; the caller stores it under G0's own output, never in qr_<seed>.json. Filters A and B need src/ukf_ext
-    (E4)."""
+    """G0's own q by the section 7.5 NIS rule on the tuning set (tuning.tune_q, the real-data core; filters A and B
+    through tune_g0_q_option). Returns the QRResult; the caller stores it under G0's own output, never in
+    qr_<seed>.json."""
     from src import tuning
     if filter_name != "19D":
-        raise GateError(f"q tuning for filter {filter_name!r} is not available before E4")
+        return tune_g0_q_option(cfg, series, filter_name, cache_dir, n_jobs, min_recordings)
     recs = [{"id": f"tuning_{s.index}", "segments": s.segments, "starts": s.starts} for s in series]
     return tuning.tune_q(recs, g0_cfg(cfg), cache_dir=cache_dir, n_jobs=n_jobs, min_recordings=min_recordings)
 
@@ -931,6 +939,438 @@ def time_gate_series(cfg, root):
             emit(f"   DIAGNOSTIC ONLY (flag off): smoothed g12 {p1.params.g12:.2f}, g21 {p1.params.g21:.2f} "
                  f"(truth {s.gains[0]:.2f}); rho {p1.params.rho1:.3f}, {p1.params.rho2:.3f} "
                  f"(truth {cfg['jansen_rit']['A'] / cfg['jansen_rit']['B']:.3f}); pass 2 windows {len(p2.windows) if p2 else None}")
+
+
+# ---------------------------------------------------------------- E4: the filter option (DEV-005)
+
+FILTER_KINDS = {"19D": "N", "A": "A", "B": "B"}      # option name -> ukf_ext kind ("N" = no extra state = the 19-D filter)
+
+
+def gate_filters(cfg, pilot):
+    """The filter options a G0 run covers. Pilot mode: every option of g0.filter_options, reported side by side. A full
+    run needs the decided g0.filter and REFUSES while it is unset (DEV-005 decides it; never hard-coded here)."""
+    options = list(cfg["g0"]["filter_options"])
+    if pilot:
+        return options
+    f = cfg["g0"]["filter"]
+    if f is None:
+        raise GateError("g0.filter is unset (the DEV-005 decision): the full G0 run refuses to start")
+    if f not in options:
+        raise GateError(f"g0.filter {f!r} is not one of {options}")
+    return [f]
+
+
+def filter_context(cfg, filter_name, segments):
+    """Context in which passes.run_pass1 / run_pass2 (unchanged src code) run the chosen filter: nothing for '19D',
+    the extended filter with this recording's own (s2, tau) for 'A' and 'B' (pass 2 then runs 14-D windows)."""
+    import contextlib
+    from src import ukf_ext
+    if filter_name not in FILTER_KINDS:
+        raise GateError(f"unknown filter option {filter_name!r}")
+    if filter_name == "19D":
+        return contextlib.nullcontext()
+    return ukf_ext.patched_filters(ukf_ext.spec_for(FILTER_KINDS[filter_name], segments, cfg))
+
+
+def prior_sds(cfg):
+    """Prior SD of each estimated quantity of §7.4 (for the §9.3 contraction)."""
+    from src import state_space as ss
+    out = dict(ss.parameter_prior_sd(cfg))
+    out["m"] = cfg["priors"]["m_sd"]
+    return out
+
+
+def stability_summary(monitors):
+    """Aggregate of UKF monitors (§9.3): negative-eigenvalue steps, NaN/Inf, covariance-not-PD divergences, jitter
+    fallbacks (reported only) and the smallest eigenvalue seen."""
+    mins = [m["min_eig_overall"] for m in monitors if m.get("min_eig_overall") is not None and np.isfinite(m["min_eig_overall"])]
+    return {"n_runs": len(monitors),
+            "n_negative_eig_steps": int(sum(m["n_negative_eig_steps"] for m in monitors)),
+            "n_nan_inf": int(sum(bool(m["nan_inf_seen"]) for m in monitors)),
+            "n_linalg_divergences": int(sum(str(m.get("divergence_reason") or "").startswith("linalg_error") for m in monitors)),
+            "n_jitter_fallbacks": int(sum(m["n_jitter_fallbacks"] for m in monitors)),
+            "min_eig_overall": float(min(mins)) if mins else None}
+
+
+def stability_ok(summary):
+    return summary["n_negative_eig_steps"] == 0 and summary["n_nan_inf"] == 0 and summary["n_linalg_divergences"] == 0
+
+
+def _estimates(params, gain_estimate):
+    if params is None:
+        return None
+    out = {"g12": params.g12, "g21": params.g21, "m": params.m, "p1": params.p1, "p2": params.p2,
+           "rho1": params.rho1, "rho2": params.rho2, "log_rho1": params.log_rho1, "log_rho2": params.log_rho2,
+           "posterior_sd": dict(params.posterior_sd)}
+    if gain_estimate is not None:
+        out["g12_filt"], out["g21_filt"] = gain_estimate["g12"], gain_estimate["g21"]
+    return out
+
+
+def evaluate_series(cfg, series, filter_name, q, want_pass2=True, diagnostic=True):
+    """One series through the chosen filter: pass 1 and pass 2 with the standard divergence rule ON (the estimates of
+    the verdicts exist only for a recording that is not diverged; a diverged series is a failed series, IMP-069), and
+    with diagnostic=True a second pass 1 with the state-SD flag disabled in a config copy, stored under
+    'diagnostic_flag_off' and labelled DIAGNOSTIC ONLY (IMP-066). Returns (record, pass2 or None)."""
+    from src import passes
+    gc = g0_cfg(cfg)
+    with filter_context(gc, filter_name, series.segments):
+        p1 = passes.run_pass1(series.segments, series.starts, gc, q)
+        p2 = None
+        if want_pass2 and p1.params is not None and not p1.recording_diverged:
+            skip = {s.index for s in p1.segments if s.diverged}
+            p2 = passes.run_pass2(series.segments, series.starts, p1.params, gc, q, skip_segments=skip)
+    diverged = bool(p1.recording_diverged or (p2 is not None and p2.recording_diverged))
+    est = None if diverged else _estimates(p1.params, p1.gain_estimate)
+    monitors = [s.monitor for s in p1.segments] + ([w.monitor for w in p2.windows] if p2 is not None else [])
+    rec = {"arm": series.arm, "index": series.index, "stream": series.stream, "filter": filter_name, "q": float(q),
+           "level_index": series.level_index, "g_true": series.gains[0], "z_distance": series.operating_point["distance"],
+           "regime": series.operating_point["regime"], "diverged": diverged,
+           "diverged_pass1": bool(p1.recording_diverged), "diverged_fraction_pass1": float(p1.diverged_fraction),
+           "n_segments": len(p1.segments), "n_segments_dropped_pass1": int(sum(s.diverged for s in p1.segments)),
+           "estimates": est, "stability": stability_summary(monitors), "has_term": None, "nrmse": None,
+           "linear_floor": None if series.truth is None else linear_floor_nrmse(series.truth)}
+    if diagnostic:
+        off = copy.deepcopy(gc)
+        off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
+        with filter_context(off, filter_name, series.segments):
+            d1 = passes.run_pass1(series.segments, series.starts, off, q)
+        rec["diagnostic_flag_off"] = {"diagnostic_only": True, "estimates": _estimates(d1.params, d1.gain_estimate),
+                                      "recording_diverged": bool(d1.recording_diverged)}
+    return rec, p2
+
+
+# ---------------------------------------------------------------- E4: tuning with any filter option
+
+def _tune_worker(payload):
+    """Top-level (Windows spawn): forward-only NIS run of one (recording, q) through the chosen filter."""
+    from threadpoolctl import threadpool_limits
+    from src import tuning
+    segments, starts, cfg, q, filter_name = payload
+    with threadpool_limits(limits=1):
+        with filter_context(cfg, filter_name, segments):
+            return tuning.recording_nis(segments, starts, cfg, q)
+
+
+def tune_g0_q_option(cfg, series, filter_name, cache_dir=None, n_jobs=1, min_recordings=None):
+    """G0's own q for filter A or B: the same NIS rule (tuning.select_q) over the same grid, with the gate's own worker
+    because tuning.tune_q's worker cannot see the patched filter. The cache key carries the filter name and the source
+    of ukf_ext. The rule is applied literally; at_grid_edge and in_band are reported (C7: mean NIS of A and B is far
+    below 2)."""
+    from src import tuning, ukf_ext
+    gc = g0_cfg(cfg)
+    grid = tuning.q_grid(gc)
+    ext_hash = hashlib.sha256((_SOURCE.parent / "ukf_ext.py").read_bytes()).hexdigest()
+    recs = [{"id": f"tuning_{s.index}", "segments": s.segments, "starts": s.starts,
+             "key": tuning.arrays_key(s.segments, s.starts) + f"|{filter_name}|{ext_hash}"} for s in series]
+    entries = [[None] * len(grid) for _ in recs]
+    todo = []
+    for i, r in enumerate(recs):
+        for j, qv in enumerate(grid):
+            ck = tuning.cache_key(r["key"], qv, gc)
+            hit = tuning._cache_read(cache_dir, ck)
+            if hit is not None:
+                entries[i][j] = hit
+            else:
+                todo.append((i, j, ck))
+    payloads = [(recs[i]["segments"], recs[i]["starts"], gc, float(grid[j]), filter_name) for i, j, _ in todo]
+    if n_jobs > 1 and len(payloads) > 1:
+        from joblib import Parallel, delayed
+        results = Parallel(n_jobs=n_jobs, backend=gc["compute"]["joblib_backend"])(delayed(_tune_worker)(p) for p in payloads)
+    else:
+        results = [_tune_worker(p) for p in payloads]
+    for (i, j, ck), entry in zip(todo, results):
+        entries[i][j] = entry
+        tuning._cache_write(cache_dir, ck, entry)
+    return tuning.select_q(entries, [r["id"] for r in recs], [r["key"] for r in recs], grid, gc, min_recordings)
+
+
+# ---------------------------------------------------------------- E4: truth-based measures
+
+def linear_floor_nrmse(truth):
+    """NRMSE of the BEST LINEAR approximation of the planted term (OLS on 1, u_tgt, u_src, S_src, both nodes pooled,
+    node 0 first) on the true inputs: RMS(residual) / SD(planted). It is what an equation without the product could
+    reach; reported next to every NRMSE (PLAN Stage E note, IMP-061)."""
+    X = np.concatenate([np.column_stack([np.ones(len(truth["u_tgt"])), truth["u_tgt"][:, j], truth["u_src"][:, j],
+                                         truth["s_src"][:, j]]) for j in (0, 1)])
+    y = np.concatenate([truth["planted"][:, 0], truth["planted"][:, 1]])
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    return float(np.sqrt(np.mean((X @ coef - y) ** 2)) / np.std(y))
+
+
+def equation_nrmse(equation, zscore, truth):
+    """§9.1 NRMSE of a selected equation: the recovered function (the equation on the z-scored true inputs, returned to
+    dy4/dt units with the stored target mean and SD) and the planted residual, both on the recording's TRUE simulated
+    input trajectories, RMS difference divided by the SD of the planted residual."""
+    from src import regression as R
+    X_raw = np.concatenate([np.column_stack([truth["u_tgt"][:, j], truth["u_src"][:, j], truth["s_src"][:, j]]) for j in (0, 1)])
+    y = np.concatenate([truth["planted"][:, 0], truth["planted"][:, 1]])
+    X, _ = R.design(SimpleNamespace(X_raw=X_raw, y=y), zscore)
+    yhat = R.evaluate_equation(equation, X) * zscore.sd_y + zscore.mean_y
+    return float(np.sqrt(np.mean((yhat - y) ** 2)) / np.std(y))
+
+
+# ---------------------------------------------------------------- E4: scoring (§9.1 to §9.3, §15.1)
+
+def pooled_gain_errors(rec, key_pair=("g12", "g21"), source="estimates"):
+    """Absolute relative gain errors of one record, g12 and g21 pooled; inf for a diverged series (IMP-069)."""
+    est = rec[source] if source in rec else None
+    if rec.get("diverged") or est is None:
+        return [float("inf"), float("inf")]
+    return [abs(est[k] - rec["g_true"]) / rec["g_true"] for k in key_pair]
+
+
+def positive_verdict(cfg, records):
+    """§9.1 positive control per level: median pooled gain error <= 15% and median NRMSE <= 0.25 at every level from the
+    second-weakest up (g0.pass.from_level_index); the weakest level is reported as the detection floor. A series without
+    estimates counts as inf; an NRMSE not yet available makes the level (and the verdict) None unless the gain
+    criterion already failed. Records carry level_index, g_true, diverged, estimates, nrmse, linear_floor."""
+    pc = cfg["g0"]["pass"]
+    frm = pc["from_level_index"]
+    levels = {}
+    for lv in sorted({r["level_index"] for r in records}):
+        rs = [r for r in records if r["level_index"] == lv]
+        gain = float(np.median([e for r in rs for e in pooled_gain_errors(r)]))
+        gain_f = float(np.median([e for r in rs for e in pooled_gain_errors(r, ("g12_filt", "g21_filt"))]))
+        nr = [float("inf") if r["diverged"] else r["nrmse"] for r in rs]
+        nr_known = all(v is not None for v in nr)
+        nrmse = float(np.median(nr)) if nr_known else None
+        floors = [r["linear_floor"] for r in rs if r.get("linear_floor") is not None]
+        gain_ok = gain <= pc["median_gain_rel_error_max"]
+        nr_ok = None if nrmse is None else nrmse <= pc["median_nrmse_max"]
+        required = lv >= frm
+        ok = (False if not gain_ok else nr_ok) if required else None
+        levels[int(lv)] = {"n": len(rs), "n_diverged": int(sum(r["diverged"] for r in rs)), "required": required,
+                           "gain_error_median": gain, "gain_error_median_filtered": gain_f,
+                           "nrmse_median": nrmse, "linear_floor_median": float(np.median(floors)) if floors else None,
+                           "gain_ok": gain_ok, "nrmse_ok": nr_ok, "ok": ok, "detection_floor": lv < frm}
+    req = [v["ok"] for v in levels.values() if v["required"]]
+    passed = False if any(v is False for v in req) else (None if any(v is None for v in req) else True)
+    return {"pass": passed, "levels": levels, "from_level_index": frm}
+
+
+def upper_bound_95(n_fail, n):
+    """One-sided 95% Clopper-Pearson upper bound of a failure rate: 1 - 0.05^(1/n) for no failure (about 3/n)."""
+    from scipy.stats import beta
+    if n <= 0:
+        raise GateError("no series")
+    return 1.0 if n_fail >= n else float(beta.ppf(1.0 - 0.05, n_fail + 1, n - n_fail))
+
+
+def null_arm_verdict(cfg, records):
+    """§9.2 null arm: a series FAILS if it diverged (IMP-069), if either filtered-gain estimate |g| >= delta, or if a
+    residual term was selected (has_term True); has_term None (PySR pending) leaves a series undecided. Pass = no
+    failure and none undecided; the pilot reports the 95% upper bound (about 14% at 20 series), the full G0 requires
+    0 of 60. Records carry diverged, estimates (g12_filt, g21_filt) and has_term."""
+    d = delta(cfg)
+    fails = pend = 0
+    rows = []
+    for r in records:
+        est = None if r["diverged"] else r["estimates"]
+        if est is None or "g12_filt" not in est:
+            status = "fail"
+        else:
+            inside = abs(est["g12_filt"]) < d and abs(est["g21_filt"]) < d
+            status = "fail" if not inside or r["has_term"] is True else ("pending" if r["has_term"] is None else "pass")
+        fails += status == "fail"
+        pend += status == "pending"
+        rows.append(status)
+    n = len(records)
+    allowed = cfg["g0"]["pass"]["null_false_positives_allowed"]
+    passed = False if fails > allowed else (None if pend else True)
+    return {"pass": passed, "n": n, "n_fail": int(fails), "n_pending": int(pend), "delta": d,
+            "upper_bound_95": upper_bound_95(fails, n), "status": rows}
+
+
+def contraction_verdict(cfg, records):
+    """§9.3: posterior contraction 1 - posterior SD / prior SD of every estimated quantity (p1, p2, log rho 1 and 2, g12,
+    g21, m), the MEDIAN over a level's series (a diverged series contributes 0), at every level from the second-weakest
+    up, must be >= g0.pass.contraction_min. Failure of g12, g21 or m is 'not identifiable at this level' (never dropped,
+    §7.4); failure of another quantity triggers the next step of the §7.4 reduction order, which this function names but
+    does not apply."""
+    from src import state_space as ss
+    prior = prior_sds(cfg)
+    lo = cfg["g0"]["pass"]["contraction_min"]
+    frm = cfg["g0"]["pass"]["from_level_index"]
+    levels = sorted({r["level_index"] for r in records if r["level_index"] >= frm})
+    table = {}
+    for name in ss.PARAM_NAMES_FULL:
+        per = {}
+        for lv in levels:
+            vals = []
+            for r in (x for x in records if x["level_index"] == lv):
+                est = None if r["diverged"] else r["estimates"]
+                sd = None if est is None else est["posterior_sd"].get(name)
+                vals.append(0.0 if sd is None else 1.0 - sd / prior[name])
+            per[int(lv)] = float(np.median(vals))
+        table[name] = {"per_level": per, "ok": all(v >= lo for v in per.values())}
+    failed = [k for k, v in table.items() if not v["ok"]]
+    never_drop = set(cfg["state"]["never_drop"])
+    not_identifiable = [k for k in failed if k in never_drop]
+    reducible = [k for k in failed if k not in never_drop]
+    return {"pass": not failed, "table": table, "failed": failed, "not_identifiable": not_identifiable,
+            "reduction_required": next_reduction_step(cfg) if reducible else None, "contraction_min": lo,
+            "m_contraction": {int(lv): table["m"]["per_level"][int(lv)] for lv in levels}}
+
+
+def next_reduction_step(cfg):
+    """The next unapplied step of the preregistered §7.4 reduction order, or None if all are applied."""
+    sw = cfg["state"]["reduction_switches"]
+    for step in cfg["state"]["reduction_order"]:
+        if not sw[step]:
+            return step
+    return None
+
+
+def stability_verdict(records):
+    """§9.3 numerical-stability gate over every run of the positive control (pass 1 and pass 2 monitors)."""
+    tot = {"n_runs": 0, "n_negative_eig_steps": 0, "n_nan_inf": 0, "n_linalg_divergences": 0, "n_jitter_fallbacks": 0}
+    mins = []
+    for r in records:
+        s = r["stability"]
+        for k in tot:
+            tot[k] += s[k]
+        if s["min_eig_overall"] is not None:
+            mins.append(s["min_eig_overall"])
+    tot["min_eig_overall"] = min(mins) if mins else None
+    return {"pass": stability_ok(tot), **tot}
+
+
+HARD_STOP_VERDICTS = ("null_A", "null_B", "preproc_null", "stability")
+LOW_CONFIDENCE_VERDICTS = ("positive", "contraction", "preproc_bias")
+
+
+def gate_flags(pilot, verdicts):
+    """§9.4 / §18.1 flags from the verdicts (True, False or None = pending): a failed null (A, B or artifact-only) or
+    stability verdict is a hard stop, a failed positive-control, contraction or preprocessing-bias verdict sets
+    low_confidence. Pilot mode never stops (would_hard_stop still records it)."""
+    would = any(verdicts.get(k) is False for k in HARD_STOP_VERDICTS)
+    low = any(verdicts.get(k) is False for k in LOW_CONFIDENCE_VERDICTS)
+    pending = sorted(k for k, v in verdicts.items() if v is None)
+    return {"would_hard_stop": bool(would), "hard_stop": bool(would and not pilot), "low_confidence": bool(low),
+            "pending": pending, "complete": not pending}
+
+
+def gain_profile(cfg, records):
+    """The §9.3 gain profile as a table per level (all levels, the weakest included): truth, median and IQR of the
+    recording-level estimate (g12 and g21 pooled), the filtered-gain estimate, the median posterior SD and contraction
+    of g12 / g21; diverged series are counted and left out of the estimates."""
+    prior = prior_sds(cfg)
+    out = {}
+    for lv in sorted({r["level_index"] for r in records}):
+        rs = [r for r in records if r["level_index"] == lv]
+        ok = [r for r in rs if not r["diverged"] and r["estimates"] is not None]
+        est = [r["estimates"][k] for r in ok for k in ("g12", "g21")]
+        flt = [r["estimates"][k] for r in ok for k in ("g12_filt", "g21_filt") if k in r["estimates"]]
+        sds = [r["estimates"]["posterior_sd"][k] for r in ok for k in ("g12", "g21")]
+        q = lambda v, p: float(np.percentile(v, p)) if v else None          # noqa: E731
+        out[int(lv)] = {"g_true": rs[0]["g_true"], "n": len(rs), "n_diverged": len(rs) - len(ok),
+                        "g_median": q(est, 50), "g_q25": q(est, 25), "g_q75": q(est, 75),
+                        "g_filtered_median": q(flt, 50), "posterior_sd_median": q(sds, 50),
+                        "contraction_median": (None if not sds else float(1.0 - np.median(sds) / prior["g12"]))}
+    return out
+
+
+def choose_parsimony(cfg, nrmse_by_penalty):
+    """§9.1: the penalty of the grid with the lowest MEDIAN NRMSE over the pilot positive series; ties go to the larger
+    penalty. nrmse_by_penalty maps a penalty to one NRMSE per series (inf for a failed series)."""
+    grid = list(cfg["pysr"]["parsimony_grid"])
+    meds = {p: float(np.median(nrmse_by_penalty[p])) for p in grid}
+    best = min(meds.values())
+    return {"penalty": max(p for p in grid if meds[p] == best), "median_nrmse": {str(p): meds[p] for p in grid}}
+
+
+def option_report(cfg, filter_name, records_by_arm):
+    """Per-option report fields of the DEV-005 comparison (IMP-066): per arm and level the number of series dropped by
+    the standard divergence rule, per series the rule-ON estimates and the flag-off estimates side by side (the latter
+    DIAGNOSTIC ONLY, never a verdict), the matched z-distance (median, maximum, per series) and the linear-floor NRMSE
+    per level."""
+    out = {"filter": filter_name, "arms": {}}
+    for arm, recs in records_by_arm.items():
+        levels = {}
+        for lv in sorted({r["level_index"] for r in recs}, key=lambda v: (v is None, v)):
+            rs = [r for r in recs if r["level_index"] == lv]
+            fl = [r["linear_floor"] for r in rs if r.get("linear_floor") is not None]
+            levels[str(lv)] = {"n": len(rs), "n_dropped_by_standard_rule": int(sum(r["diverged"] for r in rs)),
+                               "linear_floor_nrmse_median": float(np.median(fl)) if fl else None}
+        zs = [r["z_distance"] for r in recs]
+        out["arms"][arm] = {
+            "n": len(recs), "n_dropped_by_standard_rule": int(sum(r["diverged"] for r in recs)), "levels": levels,
+            "z_distance": {"median": float(np.median(zs)), "max": float(np.max(zs)), "per_series": [float(z) for z in zs]},
+            "side_by_side": [{"index": r["index"], "level_index": r["level_index"], "g_true": r["g_true"],
+                              "rule_on": None if r["estimates"] is None or r["diverged"] else
+                              {k: r["estimates"].get(k) for k in ("g12", "g21", "g12_filt", "g21_filt")},
+                              "diagnostic_flag_off": r.get("diagnostic_flag_off")} for r in recs],
+            "diagnostic_note": "diagnostic_flag_off estimates use a config copy with the state-SD flag disabled; they are "
+                               "never a G0 verdict"}
+    return out
+
+
+# ---------------------------------------------------------------- E4: gate.json
+
+def _jsonable(obj):
+    """JSON-safe copy: numpy scalars and arrays to Python, tuples to lists, non-finite floats to 'inf' / '-inf' / 'nan'."""
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _jsonable(obj.tolist())
+    if isinstance(obj, (np.floating, float)):
+        v = float(obj)
+        return v if np.isfinite(v) else ("nan" if np.isnan(v) else ("inf" if v > 0 else "-inf"))
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
+
+
+def gate_path(cfg, root, pilot, filter_name=None):
+    """outputs/gate.json for a full run; results/pilot/gate_<filter>.json for the pilot (never outputs/gate.json)."""
+    root = Path(root)
+    if not pilot:
+        return root / cfg["paths"]["gate_file"]
+    if filter_name is None:
+        raise GateError("a pilot gate file is per filter option")
+    return root / cfg["paths"]["pilot_results_dir"] / f"gate_{filter_name}.json"
+
+
+def build_gate_document(cfg, root, *, pilot, filter_name, verdicts, sections, q=None, parsimony=None, seeds=None):
+    """The gate.json document: schema_version, pilot, filter, hard_stop, low_confidence, would_hard_stop, pending, delta,
+    reasons, the verdicts, the per-section tables (positive, null_A, null_B, contraction, stability, preprocessing,
+    gain_profile, regime, report), G0's own q, the parsimony penalty, the seeds and the provenance. tuning.check_gate
+    reads hard_stop and low_confidence."""
+    from src import tuning
+    flags = gate_flags(pilot, verdicts)
+    reasons = [f"{k} failed" for k in HARD_STOP_VERDICTS + LOW_CONFIDENCE_VERDICTS if verdicts.get(k) is False]
+    head, dirty = tuning._git_state(Path(root))
+    doc = {"schema_version": cfg["g0"]["gate_schema_version"], "pilot": bool(pilot), "filter": filter_name,
+           "hard_stop": flags["hard_stop"], "low_confidence": flags["low_confidence"],
+           "would_hard_stop": flags["would_hard_stop"], "pending": flags["pending"], "complete": flags["complete"],
+           "reasons": reasons, "delta": delta(cfg), "verdicts": dict(verdicts), "q": q, "parsimony": parsimony,
+           "seeds": seeds if seeds is not None else dict(cfg["g0"]["seeds"]),
+           "provenance": {"git_commit": head, "git_dirty": dirty,
+                          "config_sha256": hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+                          "code_sha256": hashlib.sha256(_SOURCE.read_bytes()).hexdigest()}}
+    doc.update(sections)
+    return doc
+
+
+def write_gate(cfg, root, doc, path):
+    """Write the document atomically. A pilot document is never written to the full gate path and a full document
+    never into the pilot folder (the pilot cannot unlock real fitting, CLAUDE.md rule 6)."""
+    path, full = Path(path), Path(root) / cfg["paths"]["gate_file"]
+    pilot_dir = Path(root) / cfg["paths"]["pilot_results_dir"]
+    if doc["pilot"] and path.resolve() == full.resolve():
+        raise GateError("a pilot gate document must not be written to outputs/gate.json")
+    if not doc["pilot"] and (path.resolve() != full.resolve() or pilot_dir.resolve() in path.resolve().parents):
+        raise GateError("a full gate document is written to outputs/gate.json only")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_jsonable(doc), indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+    tmp.replace(path)
+    return path
 
 
 # ---------------------------------------------------------------- the E1 report

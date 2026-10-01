@@ -291,6 +291,14 @@ ukf:
     fixed_point_max_iterations: {value: 50, prov: placeholder, ref: "§7.5, IMP-029"}
     fixed_point_fd_step: {value: 1.0e-6, prov: placeholder, ref: "§7.5, IMP-029", note: "finite-difference step for the 2 x 2 Newton Jacobian"}
   parameter_estimate_from_smoothed_mean_after_burn_in: {value: true, prov: locked, ref: "§7.5"}
+  aperiodic:
+    welch_segment_s: {value: 2, prov: placeholder, ref: "§7.4, DEV-005, IMP-068", note: "C7 rule, fixed before any result: Welch of each clean segment, 2-s Hann"}
+    welch_overlap_fraction: {value: 0.5, prov: placeholder, ref: "DEV-005, IMP-068"}
+    fit_hz: {value: [1.0, 40.0], prov: placeholder, ref: "DEV-005, IMP-068", note: "upper edge below the 45 Hz low-pass transition"}
+    exclude_hz: {value: [7.0, 14.0], prov: placeholder, ref: "DEV-005, IMP-068", note: "alpha band left out of the fit"}
+    tau_bounds_s: {value: [0.016, 0.32], prov: placeholder, ref: "DEV-005, IMP-068", note: "corner between 10 Hz and 0.5 Hz; tau sits at the upper bound in 90 to 95% of C7 fits and is not a measured time constant"}
+    n_tau: {value: 80, prov: placeholder, ref: "DEV-005, IMP-068", note: "log grid, no optimizer"}
+    s2_floor_fraction: {value: 1.0e-6, prov: placeholder, ref: "DEV-005, IMP-068", note: "a fit with no positive bin gets s2 = this fraction of the channel variance"}
   numba:
     enabled: {value: false, prov: placeholder, ref: "§7.5, §21.2 #4", note: "IMP-044; false = the NumPy reference (default) until the C5 validation is accepted; ukf.run_filter(backend=...) overrides"}
     rtol: {value: 1.0e-8, prov: placeholder, ref: "§7.5"}
@@ -421,6 +429,7 @@ g0:
     substreams: {value: {input: 1, mixing: 2, noise: 3, common_input: 4, artifacts: 5}, prov: placeholder, ref: "§9.1, IMP-065"}
   series_duration_s: {value: 240, prov: placeholder, ref: "§9.4, IMP-065", note: "clean duration after the burn-in and the two edge trims; one 4-minute recording"}
   generation_burn_in_s: {value: 4, prov: placeholder, ref: "§9.1, IMP-065", note: "simulated and discarded; also the span over which the planted-term SD and RMS are measured"}
+  gate_schema_version: {value: 1, prov: placeholder, ref: "§18.1, IMP-069"}
   backend: {value: "numba", prov: placeholder, ref: "§16.5.2, IMP-065", note: "G0 runs on a config copy with ukf.numba.enabled = true; the global ukf.numba.enabled stays false until the pilot decides (section 21.2 #4)"}
   tuning_level_index: {value: 2, prov: placeholder, ref: "§7.5, IMP-065", note: "the G0 tuning set is generated like the positive control at this level of coupling_levels_x_C2 (index 2 = 0.10 x C2), with fresh seeds"}
   n_tuning_series: {value: 20, prov: locked, ref: "§7.5, §9.4"}
@@ -451,6 +460,7 @@ g0:
     median_nrmse_max: {value: 0.25, prov: placeholder, ref: "§9.1, §15.1"}
     median_gain_rel_error_max: {value: 0.15, prov: placeholder, ref: "§9.1, §15.1"}
     from_level: {value: "second-weakest and up", prov: locked, ref: "§9.1"}
+    from_level_index: {value: 1, prov: locked, ref: "§9.1, §9.3, IMP-069", note: "index of the second-weakest level in coupling_levels_x_C2: positive criteria and contraction are required from here up"}
     null_false_positives_allowed: {value: 0, prov: locked, ref: "§9.4"}
     null_delta_fraction_of_weakest_level: {value: 0.5, prov: placeholder, ref: "§9.2", note: "delta about 1.08 1/s; pilot may raise it, never above the weakest level"}
     contraction_min: {value: 0.5, prov: placeholder, ref: "§9.3", note: "median over a level's series, all levels except the weakest"}
