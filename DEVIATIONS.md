@@ -99,7 +99,7 @@ This section covers any change to a LOCKED item at any time, and any change to a
 - Real data loaded at the time? yes: pilot subjects only (C4b, C4c, E8; all on the training side); C4d to C8 and E5 to E7 used synthetic data only; no test-subject data; no full-cohort result seen.
 - Could this affect G0 or a C1-C4 verdict? How? Yes. Gain recovery, the null gate (§9.2) and the divergence rate all depend on it: with the 19-D filter and 1/f-like noise G0 can fail the gain-error, null and divergence criteria; with A or B the null gate holds but the gain error may stay above the 15% criterion.
 - Approved by: Daniel Voldman, 2026-10-01 (the DECISION above)
-- Commit: 4b134fd (last diagnostic, C8); docs entry in the Stage C closing commit; evidence E5 335b505, E6 58dc0ca, E7 c710d66, E8 267339c and 312f453; adoption commit: pending (filled in after the commit)
+- Commit: 4b134fd (last diagnostic, C8); docs entry in the Stage C closing commit; evidence E5 335b505, E6 58dc0ca, E7 c710d66, E8 267339c and 312f453; adoption commit: c24c937
 
 **Entry template**
 
