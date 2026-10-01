@@ -353,7 +353,7 @@ Done when:
 
 Note (2026-09-30): done; src/synthetic_gate.py (grid, features, matching, regime label, E1 report: python -m src.synthetic_gate --grid-report --pilot), tests/test_synthetic_gate_grid.py (20 tests, 6 mutation checks), config g0.seeds / filter / filter_options / regime / features, specparam 2.0.0rc7 installed, IMP-063. Full suite 638 passed, 1 skipped (C1 writer test), 3 deselected. Findings: all 480 grid points are limit-cycle; the 15 pilot recordings all match the grid's edges (p 120 or 138, input-SD factor >= 1.10, noise share <= 0.5); axes unchanged, decision with the user. Plan additions agreed with the user: src/ukf_ext.py (E4), E5 pilot driver and DEV-005 comparison report (new step after E4).
 
-### [ ] E2. Series generator
+### [x] E2. Series generator
 Read: §9.1, §9.2.
 Done when:
 - Series are generated at 2,048 Hz.
@@ -361,6 +361,8 @@ Done when:
 - Null A and Null B are generated. Null B has a 0–20 ms lag and a 30–50% input-variance share.
 - 1/f plus white noise is added, and m ~ U(0.1, 0.4).
 - Each series is scaled to µV, run through the real preprocessing, and rescaled.
+
+Note (2026-09-30): done; src/synthetic_gate.py (planted kernel, run_planted, null_b_input, generate_series, tuning_set, tune_g0_q for 19D, time_one_series), tests/test_synthetic_gate_series.py (21 tests, 8 mutation checks), config g0.seeds.arm_codes / substreams, series_duration_s, generation_burn_in_s, backend, tuning_level_index, n_tuning_series, IMP-064 and IMP-065. One series (19-D, Numba) takes about 1 s to generate and 12.9 s for both passes with the state-SD flag off; with the standard rule ON that series diverged at step 187 and would count as failed. Realised planted RMS ratio 0.46 to 0.53 at L1 to L3 but 0.76 to 0.84 at L4. Run `python -m src.synthetic_gate --time-series --pilot`.
 
 ### [ ] E3. Preprocessing-gate artifacts
 Read: §5.2.

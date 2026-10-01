@@ -417,6 +417,13 @@ g0:
     preprocessing_gate: {value: 94000, prov: placeholder, ref: "§5.2, IMP-063"}
     grid: {value: 95000, prov: placeholder, ref: "§9.1, IMP-063", note: "regime-grid simulations (E1); not named in the approval, added as its own block"}
     fresh_round_stride: {value: 10000, prov: placeholder, ref: "§9.4, IMP-063", note: "added per fresh-seed round after any pipeline fix"}
+    arm_codes: {value: {positive: 1, null_A: 2, null_B: 3, artifact_null: 4}, prov: placeholder, ref: "§9.1, IMP-065", note: "series rng = default_rng([block + round x stride, arm code, substream code, i]); the operating-point draw uses arm code 0, so series i of every arm shares its operating point"}
+    substreams: {value: {input: 1, mixing: 2, noise: 3, common_input: 4, artifacts: 5}, prov: placeholder, ref: "§9.1, IMP-065"}
+  series_duration_s: {value: 240, prov: placeholder, ref: "§9.4, IMP-065", note: "clean duration after the burn-in and the two edge trims; one 4-minute recording"}
+  generation_burn_in_s: {value: 4, prov: placeholder, ref: "§9.1, IMP-065", note: "simulated and discarded; also the span over which the planted-term SD and RMS are measured"}
+  backend: {value: "numba", prov: placeholder, ref: "§16.5.2, IMP-065", note: "G0 runs on a config copy with ukf.numba.enabled = true; the global ukf.numba.enabled stays false until the pilot decides (section 21.2 #4)"}
+  tuning_level_index: {value: 2, prov: placeholder, ref: "§7.5, IMP-065", note: "the G0 tuning set is generated like the positive control at this level of coupling_levels_x_C2 (index 2 = 0.10 x C2), with fresh seeds"}
+  n_tuning_series: {value: 20, prov: locked, ref: "§7.5, §9.4"}
   filter: {value: null, prov: unset, ref: "§7.5, DEV-005", note: "the filter model G0 runs (19D, A or B); the full run refuses while unset; decided by DEV-005, never hard-coded"}
   filter_options: {value: ["19D", "A", "B"], prov: placeholder, ref: "DEV-005", note: "pilot mode runs and reports every option"}
   cache_subdir: {value: "g0", prov: placeholder, ref: "§18, IMP-063", note: "under paths.cache_dir"}

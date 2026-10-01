@@ -1,4 +1,5 @@
-"""Synthetic gate G0 (PLAN.md Stage E; §5.2, §9, §18.1). This file holds E1 so far: the operating-regime grid.
+"""Synthetic gate G0 (PLAN.md Stage E; §5.2, §9, §18.1). This file holds E1 (the operating-regime grid) and E2
+(series generator, Null A, Null B, the G0 tuning set).
 
 E1 (§9.1, "operating regime matched to real data"): a grid of simulations over (p, input-noise SD, additive
 observation-noise level), 12 x 8 x 5 by default, each reduced to three SCALE-FREE features (alpha peak
@@ -11,8 +12,18 @@ Training-only rule (CLAUDE.md rule 6): the feature table is built only from subj
 the split (check_training_side) and, in development runs, only from pilot subjects (preprocess guard). Every
 random draw uses numpy.random.default_rng with a seed from config g0.seeds (rule 3). Nothing here calls PySR.
 
-Entry point: python -m src.synthetic_gate --grid-report --pilot
+E2 (§9.1, §9.2, §7.5): generate_series() makes one series with exact truth: stochastic Heun at 2,048 Hz with the
+planted product residual (a compiled kernel here; src/model.py is untouched and the kernel equals model.simulate
+when the planted coefficient is 0), the series' operating point from the E1 grid, mixing m ~ U(0.1, 0.4),
+1/f plus white noise, scaling to the training median bipolar SD in uV, then the real notch, band-pass,
+edge trim and segment_signal (blinks, 1-s rejection, anti-aliased downsampling, rescaling to mu_ref/sigma_ref).
+Null A has zero coupling and no planted term; Null B adds a shared input with a lag of 0-20 ms carrying 30-50% of
+each node's input variance. Every random draw is default_rng([block + round x stride, arm, substream, i]).
+
+Entry points: python -m src.synthetic_gate --grid-report --pilot
+              python -m src.synthetic_gate --time-series --pilot
 """
+import copy
 import hashlib
 import json
 import logging
@@ -21,11 +32,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from numba import njit
 from scipy.signal import welch
 
 from src import model
 from src import preprocess as pp
 from src.config import REPO_ROOT, load_config
+from src.model import N_STATES, Y1, Y2, _rhs_node, _sig
 
 log = logging.getLogger(__name__)
 
@@ -368,14 +381,329 @@ def match_grid_point(grid_features, valid, target, scale):
     return i, float(d[i])
 
 
-def series_operating_point(cfg, grid, table, stream, i):
+def stream_base(cfg, stream, round_=0):
+    """Seed block of a stream ('pilot', 'full', 'tuning', 'preprocessing_gate') in fresh-seed round `round_`."""
+    sd = cfg["g0"]["seeds"]
+    return sd[stream] + int(round_) * sd["fresh_round_stride"]
+
+
+def series_operating_point(cfg, grid, table, stream, i, round_=0):
     """The operating point of series i of a seed stream: random training feature vector, nearest grid point.
-    stream is a key of g0.seeds ('pilot', 'full', 'tuning', 'preprocessing_gate')."""
-    rng = np.random.default_rng([cfg["g0"]["seeds"][stream], 0, int(i)])
+    Arm code 0, so series i of every arm of a stream shares its operating point (paired comparison)."""
+    rng = np.random.default_rng([stream_base(cfg, stream, round_), 0, int(i)])
     row, vec = draw_feature_vector(table, rng)
     idx, dist = match_grid_point(grid.features, grid.valid, vec, table.scale)
     return {"series": int(i), "recording": table.names[row], "target": [float(v) for v in vec],
             "distance": dist, **grid.point(idx)}
+
+
+# ---------------------------------------------------------------- E2: the planted-residual simulator
+
+@njit(fastmath=False)
+def _planted_kernel(u_in, y_init, s_fill, pot_fill, G, c, sd, delay, dt, A, B, a, b, C1, C2, C3, C4, e0, v0, r):
+    """Heun kernel of src.model with one extra additive term in the y4 bracket,
+    r_res_j(t) = c_j u_src(t - d) u_tgt(t), u = (y1 - y2) / sd, held within a step like the input (§9.1).
+    With c = 0 the states equal model._simulate_kernel bit for bit."""
+    n_steps, n = u_in.shape
+    states = np.empty((n_steps + 1, n, N_STATES), dtype=np.float64)
+    s_all = np.empty((n_steps + 1 + delay, n), dtype=np.float64)
+    pot_all = np.empty((n_steps + 1 + delay, n), dtype=np.float64)
+    drive_out = np.empty((n_steps, n), dtype=np.float64)
+    res_out = np.empty((n_steps, n), dtype=np.float64)
+    for i in range(n):
+        for k in range(delay):
+            s_all[k, i] = s_fill[i]
+            pot_all[k, i] = pot_fill[i]
+        for m in range(N_STATES):
+            states[0, i, m] = y_init[i, m]
+    k1 = np.empty(N_STATES, dtype=np.float64)
+    k2 = np.empty(N_STATES, dtype=np.float64)
+    ypred = np.empty(N_STATES, dtype=np.float64)
+    for k in range(n_steps):
+        for i in range(n):
+            pot_all[k + delay, i] = states[k, i, Y1] - states[k, i, Y2]
+            s_all[k + delay, i] = _sig(pot_all[k + delay, i], e0, v0, r)
+        for j in range(n):
+            d1 = 0.0
+            d2 = 0.0
+            src = 1 - j
+            for i in range(n):
+                d1 += G[j, i] * s_all[k, i]
+                d2 += G[j, i] * s_all[k + 1, i]
+            res = c[j] * (pot_all[k, src] / sd[src]) * (pot_all[k + delay, j] / sd[j])
+            drive_out[k, j] = d1
+            res_out[k, j] = res
+            _rhs_node(states[k, j], u_in[k, j], d1 + res, A[j], B[j], a, b, C1, C2, C3, C4, e0, v0, r, k1)
+            for m in range(N_STATES):
+                ypred[m] = states[k, j, m] + dt * k1[m]
+            _rhs_node(ypred, u_in[k, j], d2 + res, A[j], B[j], a, b, C1, C2, C3, C4, e0, v0, r, k2)
+            for m in range(N_STATES):
+                states[k + 1, j, m] = states[k, j, m] + 0.5 * dt * (k1[m] + k2[m])
+    return states, drive_out, res_out, s_all, pot_all
+
+
+def _run_kernel(cfg, u, g12, g21, p, c, sd):
+    k = model.constants(cfg)
+    jr = cfg["jansen_rit"]
+    A = np.full(2, float(jr["A"]))
+    B = np.full(2, float(jr["B"]))
+    steady = [model.steady_state(float(p[i]), A[i], B[i], cfg) for i in range(2)]
+    s_fill = np.array([model.sigmoid(v[Y1] - v[Y2], k["e0"], k["v0"], k["r"]) for v in steady])
+    pot_fill = np.array([v[Y1] - v[Y2] for v in steady])
+    G = np.zeros((2, 2))
+    G[1, 0], G[0, 1] = g12, g21
+    fs = float(cfg["g0"]["generation_fs_hz"])
+    delay = int(cfg["coupling"]["sim_delay_steps"])
+    out = _planted_kernel(np.ascontiguousarray(u, dtype=np.float64), np.array(steady, dtype=np.float64), s_fill,
+                          pot_fill, G, np.asarray(c, dtype=np.float64), np.asarray(sd, dtype=np.float64), delay,
+                          1.0 / fs, A, B, k["a"], k["b"], k["C1"], k["C2"], k["C3"], k["C4"], k["e0"], k["v0"], k["r"])
+    return out, A, delay
+
+
+def run_planted(cfg, u, g12, g21, p, c_rel, burn_samples):
+    """Two-pass planted simulation (§9.1): a first run with c = 0 gives each node's SD of y1 - y2 and the RMS of
+    its base coupling drive after the burn-in; c_j is set so RMS(r_res_j) = c_rel x RMS(drive_j) in that run, and the
+    series is simulated again with the term (the realised ratio of the final run is returned, not retuned).
+    c_rel = 0 simulates once without the term. Returns a dict with the states and the exact bookkeeping."""
+    p = np.asarray(p, dtype=np.float64)
+    n_steps = u.shape[0]
+    (states, drive, res, s_all, pot_all), A, delay = _run_kernel(cfg, u, g12, g21, p, [0.0, 0.0], [1.0, 1.0])
+    pot = states[burn_samples:n_steps, :, Y1] - states[burn_samples:n_steps, :, Y2]
+    sd = pot.std(axis=0)
+    c = np.zeros(2)
+    if c_rel > 0.0:
+        for j in (0, 1):
+            src = 1 - j
+            basis = (pot_all[burn_samples:n_steps, src] / sd[src]) * (pot_all[burn_samples + delay:n_steps + delay, j] / sd[j])
+            c[j] = c_rel * np.sqrt(np.mean(drive[burn_samples:, j] ** 2)) / np.sqrt(np.mean(basis ** 2))
+        (states, drive, res, s_all, pot_all), A, delay = _run_kernel(cfg, u, g12, g21, p, c, sd)
+    ratio = [float(np.sqrt(np.mean(res[burn_samples:, j] ** 2)) / np.sqrt(np.mean(drive[burn_samples:, j] ** 2)))
+             if np.any(drive[burn_samples:, j]) else float("nan") for j in (0, 1)]
+    return {"states": states, "drive": drive, "res": res, "s_all": s_all, "pot_all": pot_all, "c": c, "sd": sd,
+            "A": A, "delay": delay, "rms_ratio": ratio}
+
+
+def level_gain(cfg, level_index):
+    """Coupling gain of a level: coupling_levels_x_C2[level] x C2 (about 2.16, 5.4, 10.8, 27 s^-1)."""
+    return float(cfg["g0"]["coupling_levels_x_C2"][level_index]) * model.constants(cfg)["C2"]
+
+
+def delta(cfg):
+    """The null band (§9.2): half the weakest planted level."""
+    return cfg["g0"]["pass"]["null_delta_fraction_of_weakest_level"] * level_gain(cfg, 0)
+
+
+# ---------------------------------------------------------------- E2: seeds and the Null B input
+
+def series_rng(cfg, stream, arm, substream, i, round_=0):
+    sd = cfg["g0"]["seeds"]
+    return np.random.default_rng([stream_base(cfg, stream, round_), sd["arm_codes"][arm],
+                                  sd["substreams"][substream], int(i)])
+
+
+def null_b_input(cfg, rng_input, rng_common, n_steps, p, half_width):
+    """Input of Null B (§9.2): the independent uniform input of every node plus a shared stochastic component, mixed
+    with weights sqrt(1 - s) and sqrt(s) so each node's total input variance is unchanged and the shared part carries
+    the share s ~ U(common_input_variance_share). The shared signal reaches one node (random per series) `lag` steps
+    before the other, lag ~ U(common_input_lag_ms) quantised to generation steps. Returns (u (n, 2), meta)."""
+    nb = cfg["g0"]["null_B"]
+    fs = cfg["g0"]["generation_fs_hz"]
+    share = float(rng_common.uniform(*nb["common_input_variance_share"]))
+    lag_ms = float(rng_common.uniform(*nb["common_input_lag_ms"]))
+    lag = int(round(lag_ms * 1e-3 * fs))
+    lead = int(rng_common.integers(2))
+    ec = rng_common.uniform(-1.0, 1.0, size=n_steps + lag)
+    own = rng_input.uniform(-1.0, 1.0, size=(n_steps, 2))
+    common = np.empty((n_steps, 2))
+    common[:, lead] = ec[lag:]
+    common[:, 1 - lead] = ec[:n_steps]
+    u = np.asarray(p, dtype=np.float64) + half_width * (np.sqrt(1.0 - share) * own + np.sqrt(share) * common)
+    return u, {"share": share, "lag_ms_drawn": lag_ms, "lag_steps": lag, "leading_node": lead}
+
+
+# ---------------------------------------------------------------- E2: units, the real chain, truth rows
+
+def scale_to_uv(cfg, z, fs_hz, target_sd_uv):
+    """Scale each channel (mean removed) so that its SD after the real band-pass and edge trim equals the training
+    median bipolar SD in uV (§9.1 'Units'). Returns (x_uv, per-channel factor)."""
+    bp = pp.trim_edges(pp.bandpass(cfg, z, fs_hz), fs_hz, pp.edge_trim_seconds(cfg))
+    factor = target_sd_uv / bp.std(axis=1, ddof=1)
+    return (z - z.mean(axis=1, keepdims=True)) * factor[:, None], factor
+
+
+def preprocess_series(cfg, x_uv, fs_hz, strict=False):
+    """The real chain on bipolar channels in uV at the generation rate: line-noise notch, zero-phase band-pass, edge
+    trim, then preprocess.segment_signal (blinks, 1-s rejection, padding, anti-aliased downsampling to the
+    observation rate, clean stretches, rescaling to mu_ref and sigma_ref). The electrode-level steps (bad-channel
+    flags on the four electrodes) have no synthetic counterpart."""
+    trim_s = pp.edge_trim_seconds(cfg)
+    notched = pp.notch(cfg, x_uv, fs_hz)
+    bp = pp.trim_edges(pp.bandpass(cfg, notched, fs_hz), fs_hz, trim_s)
+    return pp.segment_signal(cfg, bp, pp.trim_edges(notched, fs_hz, trim_s), fs_hz, strict)
+
+
+def observation_rows(cfg, n_obs):
+    """Simulator state rows of the first n_obs observation samples of the trimmed series: observation sample j sits
+    at generation index trim + step x j of the kept output, i.e. state row 1 + burn + trim + step x j."""
+    fs = cfg["g0"]["generation_fs_hz"]
+    step = int(round(fs / cfg["preprocessing"]["observation_fs_hz"]))
+    first = 1 + int(round(cfg["g0"]["generation_burn_in_s"] * fs)) + int(round(pp.edge_trim_seconds(cfg) * fs))
+    return first + step * np.arange(n_obs)
+
+
+@dataclass
+class Series:
+    arm: str
+    index: int
+    stream: str
+    level_index: object          # None for the nulls
+    gains: tuple                 # true (g12, g21)
+    m: float
+    operating_point: dict        # includes the matched z-distance
+    segments: list
+    starts: list
+    truth: object                # dict of (N, 2) arrays on the observation axis, or None
+    meta: dict
+
+    def summary(self):
+        """Flat record of a series for the G0 outputs, including the matched z-distance of its operating point."""
+        op = self.operating_point
+        out = {"arm": self.arm, "index": self.index, "stream": self.stream, "level_index": self.level_index,
+               "g12": self.gains[0], "g21": self.gains[1], "m": self.m, "p": op["p"],
+               "input_sd_factor": op["input_sd_factor"], "noise_share": op["noise_share"], "regime": op["regime"],
+               "matched_recording": op["recording"], "z_distance": op["distance"],
+               "clean_s": self.meta["clean_s"], "n_segments": len(self.segments)}
+        out.update({k: v for k, v in self.meta.items() if k in ("rms_ratio", "c", "null_B", "round")})
+        return out
+
+
+def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None, with_truth=True):
+    """One synthetic series of arm 'positive', 'null_A' or 'null_B' (§9.1, §9.2); see the module docstring."""
+    import time
+    if arm not in ("positive", "null_A", "null_B"):
+        raise GateError(f"unknown arm {arm!r}")
+    if arm == "positive" and level_index is None:
+        level_index = int(i) % len(cfg["g0"]["coupling_levels_x_C2"])
+    g0 = cfg["g0"]
+    fs = g0["generation_fs_hz"]
+    obs_fs = cfg["preprocessing"]["observation_fs_hz"]
+    trim_s = pp.edge_trim_seconds(cfg)
+    n_burn = int(round(g0["generation_burn_in_s"] * fs))
+    n_keep = int(round((g0["series_duration_s"] + 2 * trim_s) * fs))
+    t0 = time.perf_counter()
+    op = series_operating_point(cfg, grid, table, stream, i, round_)
+    p_vec = np.array([op["p"], op["p"]])
+    hw = model.default_half_width(cfg) * op["input_sd_factor"]
+    rng_in = series_rng(cfg, stream, arm, "input", i, round_)
+    meta = {"round": int(round_)}
+    if arm == "null_B":
+        u, meta["null_B"] = null_b_input(cfg, rng_in, series_rng(cfg, stream, arm, "common_input", i, round_),
+                                         n_burn + n_keep, p_vec, hw)
+    else:
+        u = model.draw_input(rng_in, n_burn + n_keep, 2, p_vec, cfg, hw)
+    g = level_gain(cfg, level_index) if arm == "positive" else 0.0
+    c_rel = g0["planted_residual_rms_fraction_of_base"] if arm == "positive" else 0.0
+    sim = run_planted(cfg, u, g, g, p_vec, c_rel, n_burn)
+    meta["c"] = [float(v) for v in sim["c"]]
+    meta["rms_ratio"] = sim["rms_ratio"]
+    t_sim = time.perf_counter()
+    st = sim["states"]
+    y = np.ascontiguousarray(st[1 + n_burn:1 + n_burn + n_keep, :, Y1] - st[1 + n_burn:1 + n_burn + n_keep, :, Y2])
+    m = float(series_rng(cfg, stream, arm, "mixing", i, round_).uniform(*g0["mixing_m_range"]))
+    z = observe_noisy(cfg, y, fs, m, op["noise_share"], grid.exponent, series_rng(cfg, stream, arm, "noise", i, round_))
+    x_uv, factor = scale_to_uv(cfg, z, fs, table.target_sd_uv)
+    meta["uv_factor"] = [float(v) for v in factor]
+    t_obs = time.perf_counter()
+    res = preprocess_series(cfg, x_uv, fs)
+    t_pre = time.perf_counter()
+    meta["clean_s"] = float(res.meta["b5"]["log"]["clean_s"])
+    meta["preprocessing_log"] = res.meta["b5"]["log"]
+    truth = None
+    if with_truth and arm == "positive":
+        n_obs = int(round((y.shape[0] - 2 * int(round(trim_s * fs))) * obs_fs / fs))
+        rows, d = observation_rows(cfg, n_obs), sim["delay"]
+        pot_all, s_all = sim["pot_all"], sim["s_all"]
+        a = model.constants(cfg)["a"]
+        u_tgt = pot_all[rows + d, :]
+        u_src = pot_all[rows, :][:, ::-1]                    # column j: the OTHER node's potential, one delay earlier
+        s_src = s_all[rows, :][:, ::-1]
+        basis = (u_src / sim["sd"][::-1][None, :]) * (u_tgt / sim["sd"][None, :])
+        truth = {"u_tgt": u_tgt, "u_src": u_src, "s_src": s_src, "basis": basis,
+                 "planted": basis * (sim["A"][None, :] * a * sim["c"][None, :])}
+    meta["timing_s"] = {"simulate": t_sim - t0, "observe_and_scale": t_obs - t_sim, "preprocess": t_pre - t_obs}
+    return Series(arm, int(i), stream, level_index, (g, g), m, op, res.segments, res.starts, truth, meta)
+
+
+# ---------------------------------------------------------------- E2: the G0 tuning set
+
+def g0_cfg(cfg):
+    """Config copy G0 runs with: the Numba backend per g0.backend (the global switch stays as it is)."""
+    c = copy.deepcopy(cfg)
+    c["ukf"]["numba"]["enabled"] = cfg["g0"]["backend"] == "numba"
+    return c
+
+
+def tuning_set(cfg, grid, table, n=None, round_=0):
+    """The G0 tuning set (§7.5): n (20) series generated like the positive control at the mid level, fresh seeds
+    (block g0.seeds.tuning), never used for pass/fail."""
+    n = cfg["g0"]["n_tuning_series"] if n is None else n
+    return [generate_series(cfg, "positive", i, grid, table, "tuning", round_, cfg["g0"]["tuning_level_index"], False)
+            for i in range(n)]
+
+
+def tune_g0_q(cfg, series, filter_name="19D", cache_dir=None, n_jobs=1, min_recordings=None):
+    """G0's own q by the section 7.5 NIS rule on the tuning set (tuning.tune_q, the real-data core). Returns the
+    QRResult; the caller stores it under G0's own output, never in qr_<seed>.json. Filters A and B need src/ukf_ext
+    (E4)."""
+    from src import tuning
+    if filter_name != "19D":
+        raise GateError(f"q tuning for filter {filter_name!r} is not available before E4")
+    recs = [{"id": f"tuning_{s.index}", "segments": s.segments, "starts": s.starts} for s in series]
+    return tuning.tune_q(recs, g0_cfg(cfg), cache_dir=cache_dir, n_jobs=n_jobs, min_recordings=min_recordings)
+
+
+# ---------------------------------------------------------------- E2: timing of one series
+
+def time_one_series(cfg, root):
+    """Generate one positive series, run the real chain and both UKF passes (19-D, Numba) and print the time per stage.
+    Compilation and cache loading are warmed up first and excluded (CLAUDE.md)."""
+    import time
+    from src import passes
+    root = Path(root)
+    split = load_split(cfg, root)
+    pilot_ids = pp.load_pilot_ids(cfg, root)
+    table = build_feature_table(cfg, sorted(pilot_ids), split, make_recording_loader(cfg, root, pilot_ids))
+    grid = build_grid(cfg, table.exponent, root / cfg["paths"]["cache_dir"] / cfg["g0"]["cache_subdir"],
+                      cfg["compute"]["joblib_n_jobs"])
+    gc = g0_cfg(cfg)
+    warm = copy.deepcopy(gc)
+    warm["g0"]["series_duration_s"] = 12
+    w = generate_series(warm, "positive", 0, grid, table, "pilot", with_truth=False)
+    passes.run_recording([w.segments[0][:, :20 * 256]], [0], warm, 1e-2)
+    t = time.perf_counter()
+    s = generate_series(gc, "positive", 2, grid, table, "pilot")
+    t_gen = time.perf_counter() - t
+    on = passes.run_pass1(s.segments, s.starts, gc, 1e-2, forward_only=True)
+    off = copy.deepcopy(gc)                    # state-SD flag disabled in this copy only, as in C4b to C8 (timing)
+    off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
+    t = time.perf_counter()
+    p1 = passes.run_pass1(s.segments, s.starts, off, 1e-2)
+    t_p1 = time.perf_counter() - t
+    t = time.perf_counter()
+    p2 = passes.run_pass2(s.segments, s.starts, p1.params, off, 1e-2) if p1.params is not None else None
+    t_p2 = time.perf_counter() - t
+    emit("== E2: one positive series (pilot stream, i = 2, level index 2), 19-D, Numba, q = 1e-2 (timing only) ==")
+    emit(f"summary {s.summary()}")
+    emit(f"generation {t_gen:.2f} s  (simulate {s.meta['timing_s']['simulate']:.2f}, observe+scale "
+         f"{s.meta['timing_s']['observe_and_scale']:.2f}, real preprocessing {s.meta['timing_s']['preprocess']:.2f})")
+    emit(f"standard rule ON, forward-only pass 1: diverged {on.recording_diverged} (fraction {on.diverged_fraction:.3f}); "
+         f"segments {[(sg.index, sg.diverged, sg.reason, sg.step) for sg in on.segments]}")
+    emit(f"state-SD flag OFF (timing copy): pass 1 {t_p1:.2f} s, pass 2 {t_p2:.2f} s, total series "
+         f"{t_gen + t_p1 + t_p2:.2f} s")
+    if p1.params is not None:
+        emit(f"true g = {s.gains[0]:.2f}; smoothed g12 {p1.params.g12:.2f}, g21 {p1.params.g21:.2f}; filtered-gain "
+             f"estimate {p1.gain_estimate}; pass 2 windows {len(p2.windows) if p2 is not None else None}")
+    return s
 
 
 # ---------------------------------------------------------------- the E1 report
@@ -436,6 +764,7 @@ def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(description="G0 synthetic gate (E1: regime grid report)")
     ap.add_argument("--grid-report", action="store_true")
+    ap.add_argument("--time-series", action="store_true")
     ap.add_argument("--pilot", action="store_true")
     ap.add_argument("--n-jobs", type=int, default=None)
     args = ap.parse_args(argv)
@@ -443,6 +772,11 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     if args.grid_report:
         grid_report(cfg, REPO_ROOT, args.pilot, args.n_jobs)
+        return 0
+    if args.time_series:
+        if not args.pilot:
+            raise GateError("the timing run is wired for --pilot only")
+        time_one_series(cfg, REPO_ROOT)
         return 0
     ap.error("nothing to do")
 
