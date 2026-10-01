@@ -92,7 +92,7 @@ def _worker(job):
     try:
         with threadpool_limits(limits=1):
             t0 = time.perf_counter()
-            res = passes.run_pass1(segments, starts, cfg, q, forward_only=True)
+            res = passes.run_pass1(segments, starts, cfg, q, forward_only=True, filter_name="19D")
             wall = time.perf_counter() - t0
     finally:
         ukf._first_divergence, ukf.run_filter, ss.prior_cov = orig_fd, orig_rf, orig_pc

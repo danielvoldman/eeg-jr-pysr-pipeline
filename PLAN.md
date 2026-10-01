@@ -408,6 +408,9 @@ Next steps: Stage F (baseline: F1 VAR baselines), Stage G (robustness and scorin
 
 ## Stage F: Baseline (baseline.py)
 
+### [x] F0. Wire filter A and q_fixed into the real-data path (DEV-005, DEV-006, IMP-074)
+Done (2026-10-01): passes.run_pass1/run_pass2/run_recording and tuning.recording_nis/tune_q/run_real resolve the filter (explicit, else g0.filter = A) and q (explicit, else ukf.process_noise.q_fixed = 1e-2); "19D" only by explicit name and explicit q; A runs through ukf_ext.make_runners (no global patch); results carry filter_name, state_dim (21 / 14) and, per segment, z_pred and sq_err (for Stage G); tuning cache key has the filter name and ukf_ext.py; run_real reports the NIS rule as reported_not_used. DEV-006 written (state counts, M1 = 17 + 2 = 19-D, sigma points at n = 21, no per-seed real-data q re-tuning). Tests: tests/test_filter_golden.py (numbers pinned from c25886b), tests/test_filter_wiring.py (20), 11 mutation checks. Full suite 783 passed, 1 skipped, 3 deselected.
+
 ### [ ] F1. VAR baselines
 Read: §13, §10.2.
 Done when:

@@ -89,7 +89,7 @@ def _pass1(spec, segs, starts, cfg, q, forward_only):
     from ext_ukf import patched_filters
     from src import passes
     with patched_filters(spec) as pf:
-        res = passes.run_pass1(segs, starts, cfg, q, forward_only=forward_only)
+        res = passes.run_pass1(segs, starts, cfg, q, forward_only=forward_only, filter_name="19D")
     return res, pf
 
 

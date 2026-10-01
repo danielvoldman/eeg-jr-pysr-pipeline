@@ -125,19 +125,27 @@ def _worker(job):
     captured = []
     with threadpool_limits(limits=1):
         t0 = time.perf_counter()
-        with sg.filter_context(cfg, option, segments):
-            orig = ukf.run_filter
+        orig, orig_mk = ukf.run_filter, ukf_ext.make_runners
 
-            def rf(*a, **k):
-                r = orig(*a, **k)
+        def rf(*a, **k):                                   # 19D: the plain ukf filter
+            r = orig(*a, **k)
+            captured.append(r)
+            return r
+
+        def mk(spec, *a, **k):                             # A and B: the extended runners of passes.py
+            f, sm = orig_mk(spec, *a, **k)
+
+            def g(*aa, **kk):
+                r = f(*aa, **kk)
                 captured.append(r)
                 return r
+            return g, sm
 
-            ukf.run_filter = rf
-            try:
-                res = passes.run_pass1(segments, starts, cfg, q, forward_only=True)
-            finally:
-                ukf.run_filter = orig
+        ukf.run_filter, ukf_ext.make_runners = rf, mk
+        try:
+            res = passes.run_pass1(segments, starts, cfg, q, forward_only=True, filter_name=option)
+        finally:
+            ukf.run_filter, ukf_ext.make_runners = orig, orig_mk
         wall = time.perf_counter() - t0
         if len(captured) != len(res.segments):
             raise RuntimeError("filter calls and segments do not match")

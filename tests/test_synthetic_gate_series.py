@@ -296,7 +296,7 @@ def test_tune_g0_q_uses_the_numba_copy_and_routes_other_filters(world, monkeypat
     seen = {}
     from src import tuning
 
-    def fake(recs, cfg, cache_dir=None, n_jobs=1, min_recordings=None):
+    def fake(recs, cfg, cache_dir=None, n_jobs=1, min_recordings=None, filter_name=None):
         seen.update(ids=[r["id"] for r in recs], numba=cfg["ukf"]["numba"]["enabled"], n=len(recs),
                     mr=min_recordings, cache=cache_dir)
         return "result"

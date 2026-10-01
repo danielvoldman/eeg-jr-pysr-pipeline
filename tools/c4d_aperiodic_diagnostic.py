@@ -116,7 +116,7 @@ def _corr_worker(job):
     ukf._first_divergence, ukf.run_filter = fd, rf
     try:
         with threadpool_limits(limits=1):
-            res = passes.run_pass1(segments, starts, cfg, q, forward_only=True)
+            res = passes.run_pass1(segments, starts, cfg, q, forward_only=True, filter_name="19D")
     finally:
         ukf._first_divergence, ukf.run_filter = orig_fd, orig_rf
     X, Cc = [], []

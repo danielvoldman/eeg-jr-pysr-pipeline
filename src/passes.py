@@ -16,6 +16,10 @@ re-initialized per window, the first 0.5 s of each window discarded from the ret
 Nothing here tunes Q or R (q is an argument), derives a residual, estimates a derivative or runs PySR
 (Stage D). Inputs are plain arrays: segments of shape (2, n), float64, rescaled mV at the observation
 rate, with their start indices; this module never imports preprocess.py.
+
+Filter and q (F0, DEV-005, IMP-074): every entry point resolves the filter from an explicit `filter_name` or else from
+config g0.filter (A: 21-D pass 1, 14-D windows) and q from an explicit `q` or else from ukf.process_noise.q_fixed.
+The dropped 19-D filter is reachable only as filter_name="19D", and then q must be given explicitly.
 """
 import logging
 from dataclasses import dataclass, field
@@ -32,6 +36,52 @@ log = logging.getLogger(__name__)
 
 class PassError(ValueError):
     """Raised for an inconsistent pass request."""
+
+
+# option name -> ukf_ext kind ("N" = no extra state = the 19-D filter, which runs through ukf.run_filter itself)
+FILTER_KINDS = {"19D": "N", "A": "A", "B": "B"}
+
+
+def resolve_filter(cfg, filter_name=None):
+    """The filter of a run: the explicit `filter_name`, else config g0.filter (the one place that leaf is read for runs;
+    the full G0 gate reads it through here too). Raises if unset or not one of g0.filter_options."""
+    name = cfg["g0"]["filter"] if filter_name is None else filter_name
+    if name is None:
+        raise PassError("g0.filter is unset (the DEV-005 decision): no filter can be chosen")
+    options = list(cfg["g0"]["filter_options"])
+    if name not in options or name not in FILTER_KINDS:
+        raise PassError(f"filter {name!r} is not one of {options}")
+    return name
+
+
+def resolve_q(cfg, q=None, filter_name=None):
+    """The process-noise scale of a run: the explicit `q`, else ukf.process_noise.q_fixed (DEV-005). The dropped 19-D
+    filter never gets q_fixed implicitly. qr_<seed>.json is never read."""
+    if q is not None:
+        return float(q)
+    if filter_name == "19D":
+        raise PassError("the 19D filter needs an explicit q (q_fixed is declared for the adopted filter only)")
+    value = cfg["ukf"]["process_noise"]["q_fixed"]
+    if value is None:
+        raise PassError("ukf.process_noise.q_fixed is unset")
+    return float(value)
+
+
+def make_spec(cfg, filter_name, segments):
+    """The recording's own (s2, tau) spec for A and B (estimated from its clean segments); None for 19D."""
+    if filter_name == "19D":
+        return None
+    from src import ukf_ext
+    return ukf_ext.spec_for(FILTER_KINDS[filter_name], segments, cfg)
+
+
+def _runners(filter_name, spec):
+    """(run_filter, run_smoother) for the filter: ukf's own (looked up at call time) for 19D, the extended ones of
+    ukf_ext.make_runners (looked up now) for A and B. No global patching."""
+    if filter_name == "19D":
+        return (lambda *a, **k: ukf.run_filter(*a, **k)), (lambda *a, **k: ukf.run_smoother(*a, **k))
+    from src import ukf_ext
+    return ukf_ext.make_runners(spec)
 
 
 # ---- helpers ------------------------------------------------------------------------------------
@@ -114,6 +164,8 @@ class SegmentPass1:
     n_used: int = 0                  # post-burn-in samples entering the recording-level means
     nis: object = None               # (n,) NIS per step (C4, IMP-040); None if the segment diverged
     nis_keep: object = None          # (n,) bool: samples after both burn-ins (the C4 tuning samples)
+    z_pred: object = None            # (n, 2) one-step-ahead predicted observation, rescaled units (F0); None if diverged
+    sq_err: object = None            # (n,) one-step squared error averaged over the two channels (F0); None if diverged
 
 
 @dataclass
@@ -129,6 +181,9 @@ class Pass1Result:
     gain_estimate: object            # {"g12", "g21", "n"}: mean FILTERED gain, the §9.2 null-gate estimator
     burn_in_samples: int
     estimator_burn_in_samples: int
+    filter_name: str = None
+    state_dim: int = None            # pass-1 state width: base layout + the noise states of A / B (21 for A)
+    spec: object = None              # the recording's (s2, tau) spec (None for 19D)
 
 
 @dataclass
@@ -155,6 +210,8 @@ class Pass2Result:
     recording_diverged: bool
     burn_in_samples: int
     window_samples: int
+    filter_name: str = None
+    state_dim: int = None            # window state width (14 for A)
 
     @property
     def kept(self):
@@ -170,13 +227,20 @@ class RecordingResult:
 
 # ---- pass 1 -----------------------------------------------------------------------------------------
 
-def run_pass1(segments, starts, cfg, q, layout=None, forward_only=False):
+def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, filter_name=None, spec=None):
     """Recording-level pass over the clean segments (§7.5). See the module docstring and IMP-030/031.
+
+    filter_name / q: explicit, else config (g0.filter, ukf.process_noise.q_fixed); see resolve_filter, resolve_q. `spec`
+    (A and B) is the recording's (s2, tau); it is estimated from `segments` when not given.
 
     forward_only=True (C4, IMP-040) skips the smoother and the stored covariances: params is None, the
     parameter carry and the divergence rule are unchanged, and each segment carries its NIS and the mask
     of samples after both burn-ins. The default is unchanged."""
     _check_inputs(segments, starts)
+    filter_name = resolve_filter(cfg, filter_name)
+    q = resolve_q(cfg, q, filter_name)
+    spec = make_spec(cfg, filter_name, segments) if spec is None and filter_name != "19D" else spec
+    run_filter, run_smoother = _runners(filter_name, spec)
     layout = ss.make_layout(cfg) if layout is None else layout
     if layout.fixed_params is not None:
         raise PassError("pass 1 needs a layout with the parameters in the state")
@@ -213,7 +277,7 @@ def run_pass1(segments, starts, cfg, q, layout=None, forward_only=False):
             x0[n_neural:] = carry_x
             P0[n_neural:, n_neural:] = carry_P + np.diag(walk * prior_var_par * gap_s)
             carry_in_mean, carry_in_var = carry_x.copy(), np.diag(P0)[n_neural:].copy()
-        res = ukf.run_filter(z, cfg, layout, q, x0=x0, P0=P0, keep_cov=not forward_only)
+        res = run_filter(z, cfg, layout, q, x0=x0, P0=P0, keep_cov=not forward_only)
         seg_res = SegmentPass1(index=k, start=int(start), n=T, diverged=res.diverged,
                                reason=res.divergence_reason, step=res.divergence_step,
                                monitor=res.monitor, gap_s=gap_s, carry_in_mean=carry_in_mean,
@@ -225,10 +289,13 @@ def run_pass1(segments, starts, cfg, q, layout=None, forward_only=False):
                         k, start, T, res.divergence_step, res.divergence_reason)
             continue
         if not forward_only:
-            xs, Ps = ukf.run_smoother(res, cfg)
+            xs, Ps = run_smoother(res, cfg)
             seg_res.x_filt_params = res.x[:, n_neural:].copy()
             seg_res.x_smooth_params = xs[:, n_neural:].copy()
             seg_res.sd_smooth_params = np.sqrt(np.einsum("tii->ti", Ps[:, n_neural:, n_neural:]))
+        if getattr(res, "z_pred", None) is not None:        # stub filters of some tests carry no prediction
+            seg_res.z_pred = np.array(res.z_pred[:T], dtype=np.float64)
+            seg_res.sq_err = np.mean((z - seg_res.z_pred) ** 2, axis=1)
         carry_x = res.x[-1, n_neural:].copy()
         carry_P = (res.P_last if forward_only else res.P[-1])[n_neural:, n_neural:].copy()
         seg_res.carry_out_mean, seg_res.carry_out_var = carry_x.copy(), np.diag(carry_P).copy()
@@ -277,7 +344,8 @@ def run_pass1(segments, starts, cfg, q, layout=None, forward_only=False):
     return Pass1Result(params=params, segments=seg_results, layout=layout, q=q, n_clean=n_clean,
                        n_diverged=n_div, diverged_fraction=(n_div / n_clean) if n_clean else 0.0,
                        recording_diverged=exceeds_fraction(n_div, n_clean, frac),
-                       gain_estimate=gain_estimate, burn_in_samples=burn, estimator_burn_in_samples=est_burn)
+                       gain_estimate=gain_estimate, burn_in_samples=burn, estimator_burn_in_samples=est_burn,
+                       filter_name=filter_name, state_dim=layout.n + (spec.nx if spec is not None else 0), spec=spec)
 
 
 # ---- pass 2 -----------------------------------------------------------------------------------------
@@ -287,11 +355,16 @@ def cut_windows(n_samples, window_samples):
     return [w * window_samples for w in range(int(n_samples) // int(window_samples))]
 
 
-def run_pass2(segments, starts, params, cfg, q, skip_segments=()):
-    """2-s windows with the recording-level parameters held fixed (§7.5, §10.2). See IMP-032."""
+def run_pass2(segments, starts, params, cfg, q=None, skip_segments=(), filter_name=None, spec=None):
+    """2-s windows with the recording-level parameters held fixed (§7.5, §10.2). See IMP-032. filter_name, q and spec as
+    in run_pass1 (pass the pass-1 spec so both passes use the recording's one (s2, tau)); A windows are 14-D."""
     _check_inputs(segments, starts)
     if params is None:
         raise PassError("pass 2 needs the recording-level parameters of pass 1")
+    filter_name = resolve_filter(cfg, filter_name)
+    q = resolve_q(cfg, q, filter_name)
+    spec = make_spec(cfg, filter_name, segments) if spec is None and filter_name != "19D" else spec
+    run_filter, run_smoother = _runners(filter_name, spec)
     win = _samples(cfg["windows"]["training_window_s"], cfg)
     burn = _samples(cfg["windows"]["training_burn_in_s"], cfg)
     delay = cfg["coupling"]["delay_substeps"]
@@ -305,7 +378,7 @@ def run_pass2(segments, starts, params, cfg, q, skip_segments=()):
         for w, off in enumerate(cut_windows(z.shape[0], win)):
             zw = np.ascontiguousarray(z[off:off + win])          # exactly the window's own samples
             buf = ss.make_buffer(cfg)                            # fresh buffer, steady-state fill
-            res = ukf.run_filter(zw, cfg, flayout, q, buffer=buf, keep_cov=True)
+            res = run_filter(zw, cfg, flayout, q, buffer=buf, keep_cov=True)
             n_attempted += win
             rec = WindowResult(segment=k, window=w, start=int(start) + off, diverged=res.diverged,
                                reason=res.divergence_reason, step=res.divergence_step,
@@ -315,7 +388,7 @@ def run_pass2(segments, starts, params, cfg, q, skip_segments=()):
                 log.warning("pass 2: window %d of segment %d diverged at step %s (%s); dropped",
                             w, k, res.divergence_step, res.divergence_reason)
             else:
-                xs, _ = ukf.run_smoother(res, cfg)
+                xs, _ = run_smoother(res, cfg)
                 # the delayed source S seen by sample t is lag `delay` of the buffer as it stands after
                 # step t, i.e. at the start of step t + 1 (forward-filter means, never smoothed, §7.5)
                 snaps = np.concatenate([res.snapshots[1:], ukf.buffer_snapshot(buf)[None]])
@@ -326,18 +399,23 @@ def run_pass2(segments, starts, params, cfg, q, skip_segments=()):
     return Pass2Result(windows=windows, fixed_layout=flayout, q=q, n_attempted=n_attempted,
                        n_diverged=n_div, diverged_fraction=(n_div / n_attempted) if n_attempted else 0.0,
                        recording_diverged=exceeds_fraction(n_div, n_attempted, frac),
-                       burn_in_samples=burn, window_samples=win)
+                       burn_in_samples=burn, window_samples=win, filter_name=filter_name,
+                       state_dim=flayout.n + (spec.nx if spec is not None else 0))
 
 
-def run_recording(segments, starts, cfg, q, layout=None):
+def run_recording(segments, starts, cfg, q=None, layout=None, filter_name=None):
     """Both passes. recording_diverged is the OR of the two passes, each on its own clean-sample
     denominator (IMP-035). Pass 2 is skipped for a recording that already diverged in pass 1, and
-    skips the segments that diverged in pass 1."""
-    p1 = run_pass1(segments, starts, cfg, q, layout=layout)
+    skips the segments that diverged in pass 1. The recording's (s2, tau) spec is estimated once and shared by both
+    passes."""
+    filter_name = resolve_filter(cfg, filter_name)
+    q = resolve_q(cfg, q, filter_name)
+    p1 = run_pass1(segments, starts, cfg, q, layout=layout, filter_name=filter_name,
+                   spec=make_spec(cfg, filter_name, segments))
     p2 = None
     if p1.params is not None and not p1.recording_diverged:
         skip = {s.index for s in p1.segments if s.diverged}
-        p2 = run_pass2(segments, starts, p1.params, cfg, q, skip_segments=skip)
+        p2 = run_pass2(segments, starts, p1.params, cfg, q, skip_segments=skip, filter_name=filter_name, spec=p1.spec)
     flag = p1.recording_diverged or (p2 is not None and p2.recording_diverged)
     return RecordingResult(pass1=p1, pass2=p2, recording_diverged=flag)
 

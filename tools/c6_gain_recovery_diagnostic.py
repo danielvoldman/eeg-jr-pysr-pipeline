@@ -96,7 +96,7 @@ def _pass1_numba(segments, starts, cfg, q, forward_only):
     orig_rf, orig_rs = ukf.run_filter, ukf.run_smoother
     ukf.run_filter, ukf.run_smoother = partial(orig_rf, backend="numba"), partial(orig_rs, backend="numba")
     try:
-        return passes.run_pass1(segments, starts, cfg, q, forward_only=forward_only)
+        return passes.run_pass1(segments, starts, cfg, q, forward_only=forward_only, filter_name="19D")
     finally:
         ukf.run_filter, ukf.run_smoother = orig_rf, orig_rs
 

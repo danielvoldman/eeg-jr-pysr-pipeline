@@ -129,7 +129,7 @@ def test_time_series_passes_expected_and_conservative_bound(monkeypatch):
         off = cfg["ukf"]["divergence"]["state_sd_multiple"] == float("inf")
         t[0] += 2.0 if off else 3.0
         calls.append(("p1", "off" if off else "on"))
-        return SimpleNamespace(params="P", recording_diverged=(not off) and state["diverge_on"], segments=[])
+        return SimpleNamespace(params="P", spec=None, recording_diverged=(not off) and state["diverge_on"], segments=[])
 
     def p2(segments, starts, params, cfg, q, **kw):
         t[0] += 7.0

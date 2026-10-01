@@ -67,8 +67,8 @@ def layout():
 @pytest.fixture(scope="module")
 def scen():
     rec = make_recording(CFG, SEG_SECONDS, seed=31, g12=TRUE["g12"], g21=TRUE["g21"], m=TRUE["m"], p=np.array(TRUE["p"]))
-    p1 = passes.run_pass1(rec["segments"], rec["starts"], CFG, Q_TEST)
-    p2 = passes.run_pass2(rec["segments"], rec["starts"], p1.params, CFG, Q_TEST)
+    p1 = passes.run_pass1(rec["segments"], rec["starts"], CFG, Q_TEST, filter_name="19D")
+    p2 = passes.run_pass2(rec["segments"], rec["starts"], p1.params, CFG, Q_TEST, filter_name="19D")
     return {"rec": rec, "p1": p1, "p2": p2}
 
 
@@ -245,19 +245,19 @@ def test_a_window_never_reads_observations_outside_its_2s_span(monkeypatch):
         seen.append(z.shape)
         return real(z, *a, **k)
     monkeypatch.setattr(ukf, "run_filter", spy)
-    base = passes.run_pass2([seg], [0], prm, CFG, Q_TEST)
+    base = passes.run_pass2([seg], [0], prm, CFG, Q_TEST, filter_name="19D")
     assert seen == [(WIN, 2)] * 3 and len(base.windows) == 3
     other = seg.copy()
     other[:, :WIN] += rng.normal(size=(2, WIN)) * 3.0                     # windows 0 ...
     other[:, 2 * WIN:] += rng.normal(size=(2, seg.shape[1] - 2 * WIN)) * 3.0   # ... and 2 changed, window 1 not
-    pert = passes.run_pass2([other], [0], prm, CFG, Q_TEST)
+    pert = passes.run_pass2([other], [0], prm, CFG, Q_TEST, filter_name="19D")
     assert np.array_equal(base.windows[1].x_smooth, pert.windows[1].x_smooth)
     assert np.array_equal(base.windows[1].s_delayed, pert.windows[1].s_delayed)
     assert not np.array_equal(base.windows[0].x_smooth, pert.windows[0].x_smooth)
     assert not np.array_equal(base.windows[2].x_smooth, pert.windows[2].x_smooth)
     inside = seg.copy()
     inside[:, WIN + 10] += 2.0                                            # one sample INSIDE window 1
-    assert not np.array_equal(passes.run_pass2([inside], [0], prm, CFG, Q_TEST).windows[1].x_smooth,
+    assert not np.array_equal(passes.run_pass2([inside], [0], prm, CFG, Q_TEST, filter_name="19D").windows[1].x_smooth,
                               base.windows[1].x_smooth)
 
 
@@ -267,14 +267,14 @@ def test_windows_do_not_cross_segment_gaps_and_tails_are_dropped():
     lens = [s.shape[1] for s in segs]
     assert lens == [1331, 1126]                                           # neither is a multiple of 512
     prm = fake_params()
-    out = passes.run_pass2(segs, starts, prm, CFG, Q_TEST)
+    out = passes.run_pass2(segs, starts, prm, CFG, Q_TEST, filter_name="19D")
     assert [(w.segment, w.window) for w in out.windows] == [(0, 0), (0, 1), (1, 0), (1, 1)]   # floor(1331/512)=2, floor(1126/512)=2
     assert [w.start for w in out.windows] == [starts[0], starts[0] + WIN, starts[1], starts[1] + WIN]
     for w in out.windows:
         assert w.start + WIN <= starts[w.segment] + lens[w.segment]
     # changing the OTHER segment leaves this segment's windows bit-identical
     altered = [segs[0], segs[1] + 1.5]
-    out2 = passes.run_pass2(altered, starts, prm, CFG, Q_TEST)
+    out2 = passes.run_pass2(altered, starts, prm, CFG, Q_TEST, filter_name="19D")
     assert all(np.array_equal(a.x_smooth, b.x_smooth) for a, b in zip(out.windows[:2], out2.windows[:2]))
     assert not any(np.array_equal(a.x_smooth, b.x_smooth) for a, b in zip(out.windows[2:], out2.windows[2:]))
     assert passes.cut_windows(1331, WIN) == [0, 512] and passes.cut_windows(511, WIN) == []
@@ -283,9 +283,9 @@ def test_windows_do_not_cross_segment_gaps_and_tails_are_dropped():
 def test_overlapping_or_unordered_segments_are_refused():
     seg = np.zeros((2, 600))
     with pytest.raises(passes.PassError):
-        passes.run_pass2([seg, seg], [0, 300], fake_params(), CFG, Q_TEST)
+        passes.run_pass2([seg, seg], [0, 300], fake_params(), CFG, Q_TEST, filter_name="19D")
     with pytest.raises(passes.PassError):
-        passes.run_pass1([np.zeros((3, 600))], [0], CFG, Q_TEST)
+        passes.run_pass1([np.zeros((3, 600))], [0], CFG, Q_TEST, filter_name="19D")
 
 
 # ---- carry across segments (IMP-030) -------------------------------------------------------------------------
@@ -302,7 +302,7 @@ def test_parameters_are_carried_across_segments_and_neural_states_reset(monkeypa
         outs.append(out)
         return out
     monkeypatch.setattr(ukf, "run_filter", spy)
-    res = passes.run_pass1(rec["segments"], rec["starts"], CFG, Q_TEST)
+    res = passes.run_pass1(rec["segments"], rec["starts"], CFG, Q_TEST, filter_name="19D")
     N = ss.N_NEURAL
     prior_x, prior_P = ss.prior_mean(layout, CFG), ss.prior_cov(layout, CFG)
     walk = CFG["ukf"]["process_noise"]["parameter_random_walk_factor"]
@@ -374,7 +374,7 @@ def test_recording_divergence_boundary_pass1(monkeypatch, layout, lengths, diver
     plans = [{"diverged": i == diverged_index, "values": {"p1": 200.0 + 100 * i}} for i in range(len(lengths))]
     install_stub(monkeypatch, layout, plans)
     segs, starts = stub_segments(lengths)
-    res = passes.run_pass1(segs, starts, CFG, Q_TEST)
+    res = passes.run_pass1(segs, starts, CFG, Q_TEST, filter_name="19D")
     assert res.recording_diverged is expected
     assert res.n_diverged == lengths[diverged_index] and res.n_clean == sum(lengths)
     assert res.diverged_fraction == pytest.approx(lengths[diverged_index] / sum(lengths))
@@ -386,7 +386,7 @@ def test_diverged_segments_are_excluded_from_the_mean_and_carry_resumes_after_th
              {"diverged": False, "values": {"p1": 300.0}}]
     calls = install_stub(monkeypatch, layout, plans)
     segs, starts = stub_segments((400, 300, 500), gap=200)
-    res = passes.run_pass1(segs, starts, CFG, Q_TEST)
+    res = passes.run_pass1(segs, starts, CFG, Q_TEST, filter_name="19D")
     burn = BURN
     # weighted by post-burn-in sample counts of the two GOOD segments only
     n1, n3 = 400 - burn, 500 - burn
@@ -406,7 +406,7 @@ def test_recording_level_m_is_the_mean_of_the_clipped_values(monkeypatch, layout
              {"diverged": False, "values": {"m": -0.1}}]
     install_stub(monkeypatch, layout, plans)
     segs, starts = stub_segments((300, 300, 300))
-    res = passes.run_pass1(segs, starts, CFG, Q_TEST)
+    res = passes.run_pass1(segs, starts, CFG, Q_TEST, filter_name="19D")
     n = 300 - BURN
     assert res.params.m == pytest.approx((hi + 0.3 + lo) / 3, rel=1e-13)                 # (0.5 + 0.3 + 0.0) / 3
     assert res.params.m_raw == pytest.approx((0.9 + 0.3 - 0.1) / 3, rel=1e-13)          # 0.3667, whose clip is itself
@@ -421,7 +421,7 @@ def test_reduction_layouts_follow_in_the_recording_level_values(monkeypatch):
     monkeypatch.setattr(ss, "make_layout", lambda c, include_gains=True: lay)
     install_stub(monkeypatch, lay, [{"diverged": False, "values": {"p1": 240.0, "g12": 7.0}}])
     segs, starts = stub_segments((400,))
-    res = passes.run_pass1(segs, starts, cfg, Q_TEST, layout=lay)
+    res = passes.run_pass1(segs, starts, cfg, Q_TEST, layout=lay, filter_name="19D")
     prm = res.params
     assert prm.p2 == prm.p1 == pytest.approx(240.0) and prm.g21 == prm.g12 == pytest.approx(7.0)
     assert prm.log_rho1 == prm.log_rho2 == pytest.approx(math.log(3.25 / 22))
@@ -432,7 +432,7 @@ def test_gains_less_layout_has_no_gain_estimate(monkeypatch):
     m1 = ss.make_layout(CFG, include_gains=False)
     install_stub(monkeypatch, m1, [{"diverged": False}])
     segs, starts = stub_segments((400,))
-    res = passes.run_pass1(segs, starts, CFG, Q_TEST, layout=m1)
+    res = passes.run_pass1(segs, starts, CFG, Q_TEST, layout=m1, filter_name="19D")
     assert res.gain_estimate is None and res.params.g12 == 0.0 and res.params.g21 == 0.0
 
 
@@ -443,7 +443,7 @@ def test_filtered_gain_estimator_skips_both_burn_ins(monkeypatch, layout):
     plans = [{"diverged": False, "values": {"g12": 4.0}}, {"diverged": False, "values": {"g12": 10.0}}]
     install_stub(monkeypatch, layout, plans)
     segs, starts = stub_segments((n, 1000))
-    res = passes.run_pass1(segs, starts, CFG, Q_TEST)
+    res = passes.run_pass1(segs, starts, CFG, Q_TEST, filter_name="19D")
     # segment 1: samples est_burn.. counted; segment 2: all after its own 128 (cumulative count already past)
     n1, n2 = n - est_burn, 1000 - BURN
     assert res.gain_estimate["n"] == n1 + n2
@@ -469,11 +469,11 @@ def test_pass2_drops_diverged_windows_and_applies_the_ten_percent_rule(monkeypat
     monkeypatch.setattr(ukf, "run_smoother", lambda res, cfg: (res.x, res.P))
     monkeypatch.setattr(ukf, "buffer_snapshot", lambda buf: np.zeros((DELAY + 1, 2)))
     segs = [np.zeros((2, WIN * 10))]
-    out = passes.run_pass2(segs, [0], prm, CFG, Q_TEST)                   # 1 of 10 windows = exactly 10.0 percent
+    out = passes.run_pass2(segs, [0], prm, CFG, Q_TEST, filter_name="19D")                   # 1 of 10 windows = exactly 10.0 percent
     assert out.n_attempted == 10 * WIN and out.n_diverged == WIN and out.recording_diverged is False
     assert [w.diverged for w in out.windows] == [True] + [False] * 9 and len(out.kept) == 9
     real_calls["i"] = 0
-    out = passes.run_pass2([np.zeros((2, WIN * 9))], [0], prm, CFG, Q_TEST)   # 1 of 9 > 10 percent
+    out = passes.run_pass2([np.zeros((2, WIN * 9))], [0], prm, CFG, Q_TEST, filter_name="19D")   # 1 of 9 > 10 percent
     assert out.recording_diverged is True
 
 
@@ -482,17 +482,17 @@ def test_recording_flag_is_the_or_of_both_passes_and_pass2_skips_diverged_segmen
     install_stub(monkeypatch, layout, plans)
     seen = []
 
-    def fake_p2(segments, starts, params, cfg, q, skip_segments=()):
+    def fake_p2(segments, starts, params, cfg, q, skip_segments=(), filter_name=None, spec=None):
         seen.append(set(skip_segments))
         return SimpleNamespace(recording_diverged=True)
     monkeypatch.setattr(passes, "run_pass2", fake_p2)
     segs, starts = stub_segments((2000, 100))                              # 100 / 2100 < 10 percent: pass 1 ok
-    out = passes.run_recording(segs, starts, CFG, Q_TEST)
+    out = passes.run_recording(segs, starts, CFG, Q_TEST, filter_name="19D")
     assert seen == [{1}] and out.pass1.recording_diverged is False and out.recording_diverged is True
     install_stub(monkeypatch, layout, [{"diverged": True}, {"diverged": False}])
     segs, starts = stub_segments((500, 1000))                              # 500 / 1500 = 33 percent
     seen.clear()
-    out = passes.run_recording(segs, starts, CFG, Q_TEST)
+    out = passes.run_recording(segs, starts, CFG, Q_TEST, filter_name="19D")
     assert out.pass1.recording_diverged and out.pass2 is None and out.recording_diverged and seen == []
 
 
@@ -527,8 +527,8 @@ def test_window_output_does_not_depend_on_the_priors_of_the_parameters():
     changed["priors"]["p_sd"] = 120.0
     changed["priors"]["m_mean"] = 0.4
     changed["priors"]["log_rho_sd"] = 0.5
-    base = passes.run_pass2([seg], [0], prm, CFG, Q_TEST)
-    other = passes.run_pass2([seg], [0], prm, changed, Q_TEST)
+    base = passes.run_pass2([seg], [0], prm, CFG, Q_TEST, filter_name="19D")
+    other = passes.run_pass2([seg], [0], prm, changed, Q_TEST, filter_name="19D")
     assert np.array_equal(base.windows[0].x_smooth, other.windows[0].x_smooth)
     assert np.array_equal(base.windows[0].s_delayed, other.windows[0].s_delayed)
     # control: a window that DID carry the gains in its state depends on those priors

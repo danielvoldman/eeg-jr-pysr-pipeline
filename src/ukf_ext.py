@@ -432,35 +432,42 @@ def run_smoother_ext(res, cfg, spec, base_layout):
     return xsm, Psm
 
 
-class patched_filters:
-    """Context manager: passes.run_pass1 (unchanged src code) runs the extended filter and smoother.
+def make_runners(spec, monitors=None, nis=None):
+    """(run_filter, run_smoother) of the extended filter for one recording's `spec`, with the call signatures of
+    ukf.run_filter / ukf.run_smoother that passes.py uses. The forward result is trimmed to the base dimension (the
+    noise states are per segment and are not carried) and keeps the full result in .full for the smoother. When
+    given, `monitors` and `nis` collect each forward result's monitor and its post-burn-in NIS sum (the stability
+    report of patched_filters). One implementation for passes.py (F0, DEV-005) and the patched context."""
 
-    passes.py calls ukf.run_filter / ukf.run_smoother with 19-D (base) x0, P0. The wrapper extends them, runs the
-    kernel, and hands passes.py a result trimmed to the base dimension (the noise states are per segment and are not
-    carried); the smoother wrapper finds the full result again. Each forward result's monitor is appended to
-    `monitors` for the stability report."""
+    def rf(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False, backend=None):
+        full = run_filter_ext(z, cfg, layout, q, spec, x0=x0, P0=P0, buffer=buffer, keep_cov=keep_cov)
+        if monitors is not None:
+            monitors.append(dict(full.monitor, n=int(np.asarray(z).shape[0])))
+        if nis is not None:
+            burn = int(round(cfg["passes"]["estimator_burn_in_s"] * cfg["preprocessing"]["observation_fs_hz"]))
+            v = full.nis[burn:full.n_done]                  # NIS after the 6-s burn-in of each segment
+            nis.append((float(np.sum(v)), int(v.size)))
+        return _trim(full, layout)
+
+    def rs(result, cfg, backend=None):
+        xs, Ps = run_smoother_ext(result.full, cfg, spec, result.layout)
+        nb = result.layout.n
+        return xs[:, :nb], Ps[:, :nb, :nb]
+
+    return rf, rs
+
+
+class patched_filters:
+    """Context manager: ukf.run_filter / ukf.run_smoother are replaced by the extended filter and smoother of make_runners
+    (kept for the tools and tests that wrap the ukf functions; passes.py no longer needs it). The ukf functions are
+    restored on exit. Each forward result's monitor is appended to `monitors` for the stability report."""
 
     def __init__(self, spec):
         self.spec, self.monitors, self.nis = spec, [], []
 
     def __enter__(self):
         self._orig = (ukf.run_filter, ukf.run_smoother)
-        spec = self.spec
-
-        def rf(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False, backend=None):
-            full = run_filter_ext(z, cfg, layout, q, spec, x0=x0, P0=P0, buffer=buffer, keep_cov=keep_cov)
-            self.monitors.append(dict(full.monitor, n=int(np.asarray(z).shape[0])))
-            burn = int(round(cfg["passes"]["estimator_burn_in_s"] * cfg["preprocessing"]["observation_fs_hz"]))
-            v = full.nis[burn:full.n_done]                  # NIS after the 6-s burn-in of each segment
-            self.nis.append((float(np.sum(v)), int(v.size)))
-            return _trim(full, layout)
-
-        def rs(result, cfg, backend=None):
-            xs, Ps = run_smoother_ext(result.full, cfg, spec, result.layout)
-            nb = result.layout.n
-            return xs[:, :nb], Ps[:, :nb, :nb]
-
-        ukf.run_filter, ukf.run_smoother = rf, rs
+        ukf.run_filter, ukf.run_smoother = make_runners(self.spec, self.monitors, self.nis)
         return self
 
     def __exit__(self, *exc):

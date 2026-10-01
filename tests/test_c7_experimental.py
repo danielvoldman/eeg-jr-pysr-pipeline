@@ -176,7 +176,7 @@ def test_pass1_with_patched_filters_trims_carries_only_parameters_and_restores()
     r = sim_data.make_recording(CFG, [6.0, 6.0], 16, g12=6.0, g21=6.0, burn_seconds=2.0)
     orig = (ukf.run_filter, ukf.run_smoother)
     with ext_ukf.patched_filters(SPEC_A) as pf:
-        res = passes.run_pass1(r["segments"], r["starts"], CFG, Q)
+        res = passes.run_pass1(r["segments"], r["starts"], CFG, Q, filter_name="19D")
     assert (ukf.run_filter, ukf.run_smoother) == orig
     assert res.params is not None and len(pf.monitors) == 2
     seg1 = res.segments[1]

@@ -65,7 +65,7 @@ def sim_recs():
 @pytest.fixture(scope="module")
 def tuned(sim_recs, tmp_path_factory):
     cache = tmp_path_factory.mktemp("qrcache")
-    return tuning.tune_q(sim_recs, CFG, cache_dir=cache, min_recordings=2), cache
+    return tuning.tune_q(sim_recs, CFG, cache_dir=cache, min_recordings=2, filter_name="19D"), cache
 
 
 # ---- grid -------------------------------------------------------------------------------------------------
@@ -110,13 +110,13 @@ def test_samples_after_both_burn_ins_are_counted(tuned, sim_recs):
 
 def test_recording_run_is_deterministic_and_cache_round_trips(tuned, sim_recs, monkeypatch):
     res, cache = tuned
-    e1 = tuning.recording_nis(sim_recs[0]["segments"], sim_recs[0]["starts"], CFG, float(GRID[3]))
-    e2 = tuning.recording_nis(sim_recs[0]["segments"], sim_recs[0]["starts"], CFG, float(GRID[3]))
+    e1 = tuning.recording_nis(sim_recs[0]["segments"], sim_recs[0]["starts"], CFG, float(GRID[3]), filter_name="19D")
+    e2 = tuning.recording_nis(sim_recs[0]["segments"], sim_recs[0]["starts"], CFG, float(GRID[3]), filter_name="19D")
     assert e1 == e2                                                  # bit-identical
     assert e1["mean_nis"] == res.recordings[0]["mean_nis"][3]
     # second call: every result comes from the cache; no filter run is allowed
     monkeypatch.setattr(passes, "run_pass1", lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")))
-    again = tuning.tune_q(sim_recs, CFG, cache_dir=cache, min_recordings=2)
+    again = tuning.tune_q(sim_recs, CFG, cache_dir=cache, min_recordings=2, filter_name="19D")
     assert again.to_dict() == res.to_dict()
 
 
@@ -140,8 +140,8 @@ def test_forward_only_matches_the_full_pass_and_leaves_default_unchanged():
     r = sim_data.make_recording(CFG, [3, 3], 5, g12=5.0)
     cfg = json.loads(json.dumps(CFG))
     cfg["passes"]["estimator_burn_in_s"] = 1
-    full = passes.run_pass1(r["segments"], r["starts"], cfg, 1e-2)
-    fwd = passes.run_pass1(r["segments"], r["starts"], cfg, 1e-2, forward_only=True)
+    full = passes.run_pass1(r["segments"], r["starts"], cfg, 1e-2, filter_name="19D")
+    fwd = passes.run_pass1(r["segments"], r["starts"], cfg, 1e-2, forward_only=True, filter_name="19D")
     assert full.params is not None and fwd.params is None
     for a, b in zip(full.segments, fwd.segments):
         assert a.nis is None and a.nis_keep is None              # the default path stores nothing new
@@ -165,8 +165,8 @@ def test_parallel_workers_equal_serial():
     for i in range(2):
         r = sim_data.make_recording(cfg, [1.5], 30 + i)
         recs.append({"id": f"p{i}", "segments": r["segments"], "starts": r["starts"]})
-    a = tuning.tune_q(recs, cfg, n_jobs=1, min_recordings=2)
-    b = tuning.tune_q(recs, cfg, n_jobs=2, min_recordings=2)
+    a = tuning.tune_q(recs, cfg, n_jobs=1, min_recordings=2, filter_name="19D")
+    b = tuning.tune_q(recs, cfg, n_jobs=2, min_recordings=2, filter_name="19D")
     assert a.to_dict() == b.to_dict()
 
 
@@ -194,7 +194,7 @@ def test_burn_in_masks_and_dropped_segments(monkeypatch):
     monkeypatch.setattr(ukf, "run_filter", _fake_filter(nis, diverge_calls=(1,)))
     segs = [np.zeros((2, n)) for n in lens]
     starts = [0, 2000, 4000]
-    out = tuning.recording_nis(segs, starts, CFG, 1e-2)
+    out = tuning.recording_nis(segs, starts, CFG, 1e-2, filter_name="19D")
     # segment 0: cum 0..999 < 1536 -> nothing; segment 1 diverged: dropped, does not advance the count;
     # segment 2: cum = 1000 + t, kept when t >= 128 and 1000 + t >= 1536, i.e. t >= 536
     expected = nis[2][536:]
@@ -208,10 +208,10 @@ def test_recording_diverged_flag_uses_ten_percent(monkeypatch):
     lens = [900, 100]
     nis = [np.ones(n) for n in lens]
     monkeypatch.setattr(ukf, "run_filter", _fake_filter(nis, diverge_calls=(1,)))
-    out = tuning.recording_nis([np.zeros((2, n)) for n in lens], [0, 2000], CFG, 1e-2)
+    out = tuning.recording_nis([np.zeros((2, n)) for n in lens], [0, 2000], CFG, 1e-2, filter_name="19D")
     assert out["recording_diverged"] is False                     # exactly 10.0 percent
     monkeypatch.setattr(ukf, "run_filter", _fake_filter([np.ones(899), np.ones(101)], diverge_calls=(1,)))
-    out = tuning.recording_nis([np.zeros((2, 899)), np.zeros((2, 101))], [0, 2000], CFG, 1e-2)
+    out = tuning.recording_nis([np.zeros((2, 899)), np.zeros((2, 101))], [0, 2000], CFG, 1e-2, filter_name="19D")
     assert out["recording_diverged"] is True
 
 
@@ -356,7 +356,7 @@ def test_collect_recordings_skips_ineligible_in_draw_order():
 
 
 def _stub_nis(monkeypatch, table_by_id):
-    def fake(segments, starts, cfg, q):
+    def fake(segments, starts, cfg, q, filter_name=None):
         rid = int(segments[0][0, 0])
         j = int(np.argmin(np.abs(GRID - q)))
         return _entry(table_by_id[rid][j])
@@ -376,14 +376,14 @@ def test_run_real_uses_only_training_subjects_and_needs_gate(temp_root, monkeypa
     monkeypatch.setattr(main_mod, "load_split", lambda *a, **k: (_ for _ in ()).throw(AssertionError("whole split")))
     _stub_nis(monkeypatch, {i: [2.6, 1.0, 1.9, 4.0, 5.0, 6.0, 7.0, 8.0] for i in range(1, 112)})
     with pytest.raises(tuning.GateError):
-        tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader)
+        tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader, filter_name="19D")
     assert not (temp_root / "outputs" / "qr_42.json").exists()
     (temp_root / "outputs").mkdir()
     (temp_root / "outputs" / "gate.json").write_text(json.dumps({"hard_stop": True}))
     with pytest.raises(tuning.GateError):
-        tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader)
+        tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader, filter_name="19D")
     (temp_root / "outputs" / "gate.json").write_text(json.dumps({"hard_stop": False, "low_confidence": True}))
-    res = tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader, n_jobs=1)
+    res = tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader, n_jobs=1, filter_name="19D")
     assert res.q_index == 2
     doc = json.loads((temp_root / "outputs" / "qr_42.json").read_text(encoding="utf-8"))
     assert len(doc["subjects"]) == 20 and set(doc["subjects"]) <= set(split["train"])
@@ -395,13 +395,13 @@ def test_run_real_uses_only_training_subjects_and_needs_gate(temp_root, monkeypa
     assert len(list((temp_root / "cache" / "qr_tuning").glob("*.json"))) == 20 * 8
     # a rerun with the same result leaves the file alone; a different result is refused
     before = (temp_root / "outputs" / "qr_42.json").read_bytes()
-    tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader, n_jobs=1)
+    tuning.run_real(CFG, temp_root, 42, loader=_real_like_loader, n_jobs=1, filter_name="19D")
     assert (temp_root / "outputs" / "qr_42.json").read_bytes() == before
     _stub_nis(monkeypatch, {i: [9.0, 9.0, 9.0, 2.0, 9.0, 9.0, 9.0, 9.0] for i in range(1, 112)})
     cfg2 = json.loads(json.dumps(CFG))
     cfg2["ukf"]["qr_rule"]["cache_subdir"] = "qr_other"
     with pytest.raises(tuning.TuningError):
-        tuning.run_real(cfg2, temp_root, 42, loader=_real_like_loader, n_jobs=1)
+        tuning.run_real(cfg2, temp_root, 42, loader=_real_like_loader, n_jobs=1, filter_name="19D")
 
 
 def test_pilot_mode_needs_no_gate_and_writes_under_results_pilot(temp_root, monkeypatch):
@@ -410,7 +410,7 @@ def test_pilot_mode_needs_no_gate_and_writes_under_results_pilot(temp_root, monk
     monkeypatch.setattr(main_mod, "training_subjects", lambda seed, root=None, cfg=None: list(split["train"]))
     pilot = dict.__getitem__(split, "pilot")
     _stub_nis(monkeypatch, {i: [2.6, 1.0, 1.9, 4.0, 5.0, 6.0, 7.0, 8.0] for i in range(1, 112)})
-    res = tuning.run_real(CFG, temp_root, 42, pilot=True, loader=_real_like_loader, pilot_ids=pilot, n_jobs=1)
+    res = tuning.run_real(CFG, temp_root, 42, pilot=True, loader=_real_like_loader, pilot_ids=pilot, n_jobs=1, filter_name="19D")
     doc = json.loads((temp_root / "results" / "pilot" / "qr_42.json").read_text(encoding="utf-8"))
     assert doc["pilot"] and sorted(doc["subjects"]) == sorted(pilot) and res.n_matched == len(pilot)
     assert not (temp_root / "outputs" / "qr_42.json").exists()

@@ -1,13 +1,13 @@
 """Numbers pinned from HEAD c25886b (before the F0 wiring change) for the 19-D and A filters (PLAN F0).
 
 The literals below were printed by running the pre-change code (19D: plain passes.run_pass1/run_pass2; A: the
-same inside synthetic_gate.filter_context) on the fixed recording of tests/golden_head.py at q = 1e-2. They are
+same inside synthetic_gate.filter_context; after F0 the call lines pass filter_name instead, the literals are unchanged) on the fixed recording of tests/golden_head.py at q = 1e-2. They are
 NOT produced by the code under test at the time the test runs; they must never be regenerated from a later commit.
 """
 import numpy as np
 import pytest
 
-from src import passes, synthetic_gate as sg
+from src import passes
 from src.config import load_config
 import golden_head as gh
 
@@ -25,9 +25,8 @@ GOLDEN = {
 
 def _run(name):
     r = gh.recording(CFG)
-    with sg.filter_context(CFG, name, r["segments"]):
-        p1 = passes.run_pass1(r["segments"], r["starts"], CFG, gh.Q)
-        p2 = passes.run_pass2(r["segments"], r["starts"], p1.params, CFG, gh.Q)
+    p1 = passes.run_pass1(r["segments"], r["starts"], CFG, gh.Q, filter_name=name)
+    p2 = passes.run_pass2(r["segments"], r["starts"], p1.params, CFG, gh.Q, filter_name=name, spec=p1.spec)
     return gh.summary(p1, p2)
 
 

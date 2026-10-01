@@ -57,6 +57,7 @@ from numba import njit
 from scipy.signal import welch
 
 from src import model
+from src import passes as passes_module
 from src import preprocess as pp
 from src.config import REPO_ROOT, load_config
 from src.model import N_STATES, Y1, Y2, _rhs_node, _sig
@@ -687,7 +688,8 @@ def tune_g0_q(cfg, series, filter_name="19D", cache_dir=None, n_jobs=1, min_reco
     if filter_name != "19D":
         return tune_g0_q_option(cfg, series, filter_name, cache_dir, n_jobs, min_recordings)
     recs = [{"id": f"tuning_{s.index}", "segments": s.segments, "starts": s.starts} for s in series]
-    return tuning.tune_q(recs, g0_cfg(cfg), cache_dir=cache_dir, n_jobs=n_jobs, min_recordings=min_recordings)
+    return tuning.tune_q(recs, g0_cfg(cfg), cache_dir=cache_dir, n_jobs=n_jobs, min_recordings=min_recordings,
+                         filter_name="19D")
 
 
 # ---------------------------------------------------------------- E2: timing of one series
@@ -707,18 +709,18 @@ def time_one_series(cfg, root):
     warm = copy.deepcopy(gc)
     warm["g0"]["series_duration_s"] = 12
     w = generate_series(warm, "positive", 0, grid, table, "pilot", with_truth=False)
-    passes.run_recording([w.segments[0][:, :20 * 256]], [0], warm, 1e-2)
+    passes.run_recording([w.segments[0][:, :20 * 256]], [0], warm, 1e-2, filter_name="19D")
     t = time.perf_counter()
     s = generate_series(gc, "positive", 2, grid, table, "pilot")
     t_gen = time.perf_counter() - t
-    on = passes.run_pass1(s.segments, s.starts, gc, 1e-2, forward_only=True)
+    on = passes.run_pass1(s.segments, s.starts, gc, 1e-2, forward_only=True, filter_name="19D")
     off = copy.deepcopy(gc)                    # state-SD flag disabled in this copy only, as in C4b to C8 (timing)
     off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
     t = time.perf_counter()
-    p1 = passes.run_pass1(s.segments, s.starts, off, 1e-2)
+    p1 = passes.run_pass1(s.segments, s.starts, off, 1e-2, filter_name="19D")
     t_p1 = time.perf_counter() - t
     t = time.perf_counter()
-    p2 = passes.run_pass2(s.segments, s.starts, p1.params, off, 1e-2) if p1.params is not None else None
+    p2 = passes.run_pass2(s.segments, s.starts, p1.params, off, 1e-2, filter_name="19D") if p1.params is not None else None
     t_p2 = time.perf_counter() - t
     emit("== E2: one positive series (pilot stream, i = 2, level index 2), 19-D, Numba, q = 1e-2 (timing only) ==")
     emit(f"summary {s.summary()}")
@@ -914,7 +916,7 @@ def time_gate_series(cfg, root):
     warm = copy.deepcopy(gc)
     warm["g0"]["series_duration_s"] = 12
     w = generate_series(warm, "positive", 0, grid, table, "pilot", with_truth=False)
-    passes.run_recording([w.segments[0][:, :20 * 256]], [0], warm, 1e-2)
+    passes.run_recording([w.segments[0][:, :20 * 256]], [0], warm, 1e-2, filter_name="19D")
     off = copy.deepcopy(gc)
     off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
     mode = cfg["g0"]["preprocessing_gate"]["positive_artifact_mode"]
@@ -929,12 +931,12 @@ def time_gate_series(cfg, root):
              f"({lg['rejected_before_padding_s']:.0f} s, {lg['rejected_after_padding_s']:.0f} s after padding); rules "
              f"{ {k: v['n_segments'] for k, v in lg['rules'].items()} }; clean {lg['clean_s']:.0f} s in {lg['n_clean_segments']} segments")
         emit(f"   summary {s.summary()}")
-        on = passes.run_pass1(s.segments, s.starts, gc, 1e-2, forward_only=True)
+        on = passes.run_pass1(s.segments, s.starts, gc, 1e-2, forward_only=True, filter_name="19D")
         t = time.perf_counter()
-        p1 = passes.run_pass1(s.segments, s.starts, off, 1e-2)
+        p1 = passes.run_pass1(s.segments, s.starts, off, 1e-2, filter_name="19D")
         t_p1 = time.perf_counter() - t
         t = time.perf_counter()
-        p2 = passes.run_pass2(s.segments, s.starts, p1.params, off, 1e-2) if p1.params is not None else None
+        p2 = passes.run_pass2(s.segments, s.starts, p1.params, off, 1e-2, filter_name="19D") if p1.params is not None else None
         t_p2 = time.perf_counter() - t
         emit(f"   generation {t_gen:.2f} s (simulate {s.meta['timing_s']['simulate']:.2f}, observe+scale+artifacts "
              f"{s.meta['timing_s']['observe_and_scale']:.2f}, real preprocessing {s.meta['timing_s']['preprocess']:.2f}); "
@@ -949,7 +951,7 @@ def time_gate_series(cfg, root):
 
 # ---------------------------------------------------------------- E4: the filter option (DEV-005)
 
-FILTER_KINDS = {"19D": "N", "A": "A", "B": "B"}      # option name -> ukf_ext kind ("N" = no extra state = the 19-D filter)
+FILTER_KINDS = passes_module.FILTER_KINDS             # option name -> ukf_ext kind (one table, in passes.py)
 
 
 def gate_filters(cfg, pilot):
@@ -958,12 +960,10 @@ def gate_filters(cfg, pilot):
     options = list(cfg["g0"]["filter_options"])
     if pilot:
         return options
-    f = cfg["g0"]["filter"]
-    if f is None:
-        raise GateError("g0.filter is unset (the DEV-005 decision): the full G0 run refuses to start")
-    if f not in options:
-        raise GateError(f"g0.filter {f!r} is not one of {options}")
-    return [f]
+    try:
+        return [passes_module.resolve_filter(cfg)]          # the one reader of g0.filter (F0)
+    except passes_module.PassError as exc:
+        raise GateError(f"g0.filter: {exc}") from exc
 
 
 def filter_context(cfg, filter_name, segments):
@@ -1020,12 +1020,12 @@ def evaluate_series(cfg, series, filter_name, q, want_pass2=True, diagnostic=Tru
     'diagnostic_flag_off' and labelled DIAGNOSTIC ONLY (IMP-066). Returns (record, pass2 or None)."""
     from src import passes
     gc = g0_cfg(cfg)
-    with filter_context(gc, filter_name, series.segments):
-        p1 = passes.run_pass1(series.segments, series.starts, gc, q)
-        p2 = None
-        if want_pass2 and p1.params is not None and not p1.recording_diverged:
-            skip = {s.index for s in p1.segments if s.diverged}
-            p2 = passes.run_pass2(series.segments, series.starts, p1.params, gc, q, skip_segments=skip)
+    p1 = passes.run_pass1(series.segments, series.starts, gc, q, filter_name=filter_name)
+    p2 = None
+    if want_pass2 and p1.params is not None and not p1.recording_diverged:
+        skip = {s.index for s in p1.segments if s.diverged}
+        p2 = passes.run_pass2(series.segments, series.starts, p1.params, gc, q, skip_segments=skip,
+                              filter_name=filter_name, spec=p1.spec)
     diverged = bool(p1.recording_diverged or (p2 is not None and p2.recording_diverged))
     est = None if diverged else _estimates(p1.params, p1.gain_estimate)
     monitors = [s.monitor for s in p1.segments] + ([w.monitor for w in p2.windows] if p2 is not None else [])
@@ -1039,8 +1039,7 @@ def evaluate_series(cfg, series, filter_name, q, want_pass2=True, diagnostic=Tru
     if diagnostic:
         off = copy.deepcopy(gc)
         off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
-        with filter_context(off, filter_name, series.segments):
-            d1 = passes.run_pass1(series.segments, series.starts, off, q)
+        d1 = passes.run_pass1(series.segments, series.starts, off, q, filter_name=filter_name)
         rec["diagnostic_flag_off"] = {"diagnostic_only": True, "estimates": _estimates(d1.params, d1.gain_estimate),
                                       "recording_diverged": bool(d1.recording_diverged)}
     return rec, p2
@@ -1054,8 +1053,7 @@ def _tune_worker(payload):
     from src import tuning
     segments, starts, cfg, q, filter_name = payload
     with threadpool_limits(limits=1):
-        with filter_context(cfg, filter_name, segments):
-            return tuning.recording_nis(segments, starts, cfg, q)
+        return tuning.recording_nis(segments, starts, cfg, q, filter_name)
 
 
 def tune_g0_q_option(cfg, series, filter_name, cache_dir=None, n_jobs=1, min_recordings=None):
@@ -1073,7 +1071,7 @@ def tune_g0_q_option(cfg, series, filter_name, cache_dir=None, n_jobs=1, min_rec
     todo = []
     for i, r in enumerate(recs):
         for j, qv in enumerate(grid):
-            ck = tuning.cache_key(r["key"], qv, gc)
+            ck = tuning.cache_key(r["key"], qv, gc, filter_name)
             hit = tuning._cache_read(cache_dir, ck)
             if hit is not None:
                 entries[i][j] = hit
@@ -1448,24 +1446,23 @@ def time_series_passes(cfg, series, filter_name, q):
     off = copy.deepcopy(gc)
     off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
     out = {"p2_on_s": None, "p2_bound_s": None}
-    with filter_context(gc, filter_name, series.segments):
+    t = time.perf_counter()
+    p1 = passes.run_pass1(series.segments, series.starts, gc, q, filter_name=filter_name)
+    out["p1_on_s"] = time.perf_counter() - t
+    out["diverged_pass1"] = bool(p1.recording_diverged)
+    if p1.params is not None and not p1.recording_diverged:
+        skip = {s.index for s in p1.segments if s.diverged}
         t = time.perf_counter()
-        p1 = passes.run_pass1(series.segments, series.starts, gc, q)
-        out["p1_on_s"] = time.perf_counter() - t
-        out["diverged_pass1"] = bool(p1.recording_diverged)
-        if p1.params is not None and not p1.recording_diverged:
-            skip = {s.index for s in p1.segments if s.diverged}
-            t = time.perf_counter()
-            passes.run_pass2(series.segments, series.starts, p1.params, gc, q, skip_segments=skip)
-            out["p2_on_s"] = time.perf_counter() - t
-    with filter_context(off, filter_name, series.segments):
+        passes.run_pass2(series.segments, series.starts, p1.params, gc, q, skip_segments=skip,
+                         filter_name=filter_name, spec=p1.spec)
+        out["p2_on_s"] = time.perf_counter() - t
+    t = time.perf_counter()
+    d1 = passes.run_pass1(series.segments, series.starts, off, q, filter_name=filter_name)
+    out["p1_off_s"] = time.perf_counter() - t
+    if out["p2_on_s"] is None and d1.params is not None:
         t = time.perf_counter()
-        d1 = passes.run_pass1(series.segments, series.starts, off, q)
-        out["p1_off_s"] = time.perf_counter() - t
-        if out["p2_on_s"] is None and d1.params is not None:
-            t = time.perf_counter()
-            passes.run_pass2(series.segments, series.starts, d1.params, off, q)
-            out["p2_bound_s"] = time.perf_counter() - t
+        passes.run_pass2(series.segments, series.starts, d1.params, off, q, filter_name=filter_name, spec=d1.spec)
+        out["p2_bound_s"] = time.perf_counter() - t
     out["expected_s"] = out["p1_on_s"] + (out["p2_on_s"] or 0.0) + out["p1_off_s"]
     out["bound_s"] = out["p1_on_s"] + out["p1_off_s"] + (out["p2_on_s"] if out["p2_on_s"] is not None else (out["p2_bound_s"] or 0.0))
     return out

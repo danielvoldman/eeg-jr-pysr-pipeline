@@ -386,11 +386,11 @@ def cfg_numba():
 
 @pytest.fixture(scope="module")
 def passes_numpy(recording):
-    return passes.run_recording(recording["segments"], recording["starts"], CFG, Q)
+    return passes.run_recording(recording["segments"], recording["starts"], CFG, Q, filter_name="19D")
 
 
 def test_pass1_and_pass2_are_unchanged_by_the_backend(recording, cfg_numba, passes_numpy):
-    nb = passes.run_recording(recording["segments"], recording["starts"], cfg_numba, Q)
+    nb = passes.run_recording(recording["segments"], recording["starts"], cfg_numba, Q, filter_name="19D")
     a, b = passes_numpy, nb
     assert a.recording_diverged == b.recording_diverged is False
     for k in ("p1", "p2", "log_rho1", "log_rho2", "rho1", "rho2", "A1", "B1", "A2", "B2", "g12", "g21", "m", "m_raw"):
@@ -422,8 +422,8 @@ def test_nis_and_tuning_statistic_are_unchanged_by_the_backend(recording, cfg_nu
     cfg["passes"]["estimator_burn_in_s"] = 1
     cfg_n = copy.deepcopy(cfg_numba)
     cfg_n["passes"]["estimator_burn_in_s"] = 1
-    ea = tuning.recording_nis(recording["segments"], recording["starts"], cfg, Q)
-    eb = tuning.recording_nis(recording["segments"], recording["starts"], cfg_n, Q)
+    ea = tuning.recording_nis(recording["segments"], recording["starts"], cfg, Q, filter_name="19D")
+    eb = tuning.recording_nis(recording["segments"], recording["starts"], cfg_n, Q, filter_name="19D")
     assert ea["n_samples"] == eb["n_samples"] > 0
     np.testing.assert_allclose(eb["mean_nis"], ea["mean_nis"], rtol=RTOL, atol=ATOL)
     assert {k: v for k, v in ea.items() if k != "mean_nis"} == {k: v for k, v in eb.items() if k != "mean_nis"}

@@ -264,7 +264,7 @@ ukf:
     q_grid_high: {value: 1.0e-1, prov: placeholder, ref: "§7.6"}
     q_grid_n: {value: 8, prov: placeholder, ref: "§7.6", note: "log-spaced"}
     parameter_random_walk_factor: {value: 1.0e-3, prov: placeholder, ref: "§7.6", note: "variance per second = factor * prior variance"}
-    q_fixed: {value: 1.0e-2, prov: locked, ref: "DEV-005", note: "pre-declared fixed process-noise scale for the adopted filter A (decided 2026-10-01 on pilot-mode evidence, E5 to E8, not tuned on test data); the section 7.5 NIS rule is still run and its outcome (a refusal on the G0 tuning set under the standard rule, a diagnostic fallback at the grid edge, NIS 0.5 to 0.9) is reported alongside it; nothing reads this leaf yet (the real-data runner is a later stage)"}
+    q_fixed: {value: 1.0e-2, prov: locked, ref: "DEV-005", note: "pre-declared fixed process-noise scale for the adopted filter A (decided 2026-10-01 on pilot-mode evidence, E5 to E8, not tuned on test data); the section 7.5 NIS rule is still run and its outcome (a refusal on the G0 tuning set under the standard rule, a diagnostic fallback at the grid edge, NIS 0.5 to 0.9) is reported alongside it; read by passes.resolve_q (F0, IMP-074, DEV-006): the default q of every real-data run unless an explicit q is given, for every split seed"}
   qr_rule:
     statistic: {value: "NIS closest to observation dimension", prov: locked, ref: "§7.5"}
     nis_target: {value: 2, prov: locked, ref: "§7.5"}

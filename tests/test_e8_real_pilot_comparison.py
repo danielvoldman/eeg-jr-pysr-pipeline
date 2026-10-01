@@ -158,13 +158,14 @@ def _synthetic():
 
 def test_worker_modes_set_the_state_flag_and_return_the_expected_fields(monkeypatch):
     seen = []
-    real = sg.filter_context
+    from src import passes
+    real = passes.run_pass1
 
-    def spy(cfg, name, segments):
-        seen.append((name, cfg["ukf"]["divergence"]["state_sd_multiple"], cfg["ukf"]["numba"]["enabled"]))
-        return real(cfg, name, segments)
+    def spy(segments, starts, cfg, q=None, **kw):
+        seen.append((kw.get("filter_name"), cfg["ukf"]["divergence"]["state_sd_multiple"], cfg["ukf"]["numba"]["enabled"]))
+        return real(segments, starts, cfg, q, **kw)
 
-    monkeypatch.setattr(sg, "filter_context", spy)
+    monkeypatch.setattr(passes, "run_pass1", spy)
     seg, st = _synthetic()
     on = e8._worker(("sub-x", seg, st, "19D", 1e-2, "on", CFG))
     off = e8._worker(("sub-x", seg, st, "A", 1e-2, "off", CFG))
@@ -187,7 +188,7 @@ def test_a_19d_flag_off_run_equals_the_plain_pass_1_gain_estimate():
     r = e8._worker(("sub-x", seg, st, "19D", 1e-2, "off", CFG))
     c = sg.g0_cfg(CFG)
     c["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
-    plain = passes.run_pass1(seg, st, c, 1e-2, forward_only=True)
+    plain = passes.run_pass1(seg, st, c, 1e-2, forward_only=True, filter_name="19D")
     # the forward-only gain estimate is the post-estimator-burn-in mean of the filtered gain; the worker uses the NIS-kept samples
     assert abs(r["gains"]["g12"]["mean"] - plain.gain_estimate["g12"]) < 3.0 and r["n_samples"] == plain.n_clean
 

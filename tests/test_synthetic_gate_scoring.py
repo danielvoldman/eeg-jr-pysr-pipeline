@@ -55,10 +55,10 @@ def test_19d_option_equals_plain_run_pass1_and_leaves_the_filters_alone():
     s = _series()
     gc = sg.g0_cfg(CFG)
     orig = (ukf.run_filter, ukf.run_smoother)
-    plain = passes.run_pass1(s.segments, s.starts, gc, Q)
+    plain = passes.run_pass1(s.segments, s.starts, gc, Q, filter_name="19D")
     with sg.filter_context(gc, "19D", s.segments):
         assert (ukf.run_filter, ukf.run_smoother) == orig
-        opt = passes.run_pass1(s.segments, s.starts, gc, Q)
+        opt = passes.run_pass1(s.segments, s.starts, gc, Q, filter_name="19D")
     assert _est_tuple(opt.params) == _est_tuple(plain.params) and opt.gain_estimate == plain.gain_estimate
     rec, _ = sg.evaluate_series(CFG, s, "19D", Q, diagnostic=False)
     assert rec["estimates"]["g12"] == plain.params.g12 and rec["estimates"]["g21_filt"] == plain.gain_estimate["g21"]
@@ -77,7 +77,7 @@ def test_a_and_b_equal_a_direct_ukf_ext_call_and_pass_2_windows_are_14d(name, mo
     monkeypatch.setattr(ukf_ext, "run_filter_ext", lambda z, cfg, layout, q, sp, **kw: (
         seen.append((layout.n, sp.nx)), real(z, cfg, layout, q, sp, **kw))[1])
     with sg.filter_context(gc, name, s.segments):
-        res = passes.run_recording(s.segments, s.starts, gc, Q)
+        res = passes.run_recording(s.segments, s.starts, gc, Q, filter_name=name)
     assert (ukf.run_filter, ukf.run_smoother) == orig                         # restored on exit
     # pass 1 (19 neural + parameter states) and pass 2 (12 neural states) both carry the two noise states: 21-D and 14-D
     assert seen[0] == (19, 2) and len(seen) == 1 + len(res.pass2.windows) and all(v == (12, 2) for v in seen[1:])
@@ -121,7 +121,7 @@ def test_a_diverged_recording_with_usable_parameters_still_reports_no_estimates(
     s = SimpleNamespace(segments=segs, starts=r["starts"], arm="positive", index=9, stream="pilot", level_index=2,
                         gains=(8.0, 8.0), truth=None, operating_point={"distance": 0.1, "regime": "limit_cycle"})
     gc = sg.g0_cfg(CFG)
-    direct = passes.run_pass1(s.segments, s.starts, gc, Q)
+    direct = passes.run_pass1(s.segments, s.starts, gc, Q, filter_name="19D")
     assert direct.params is not None and direct.recording_diverged and 0.1 < direct.diverged_fraction < 1.0
     rec, p2 = sg.evaluate_series(CFG, s, "19D", Q)
     assert rec["diverged"] is True and rec["estimates"] is None and p2 is None

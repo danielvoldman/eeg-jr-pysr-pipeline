@@ -32,7 +32,7 @@ from src import passes
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-_CODE_FILES = ("model.py", "state_space.py", "ukf.py", "passes.py", "tuning.py")
+_CODE_FILES = ("model.py", "state_space.py", "ukf.py", "passes.py", "tuning.py", "ukf_ext.py")
 _CONFIG_SECTIONS = ("rescaling", "jansen_rit", "simulator", "coupling", "observation", "state", "priors",
                     "ukf", "passes", "windows")
 
@@ -55,10 +55,11 @@ def q_grid(cfg):
 
 # ---- one (recording, q) filter run -----------------------------------------------------------------------
 
-def recording_nis(segments, starts, cfg, q):
-    """Forward-only pass-1 run of one recording at scale q (IMP-040). Returns a JSON-able dict with the
-    per-recording mean NIS over the kept samples (None if there are none) and the divergence facts."""
-    res = passes.run_pass1(segments, starts, cfg, q, forward_only=True)
+def recording_nis(segments, starts, cfg, q, filter_name=None):
+    """Forward-only pass-1 run of one recording at scale q (IMP-040) through the chosen filter (explicit, else
+    g0.filter, F0). Returns a JSON-able dict with the per-recording mean NIS over the kept samples (None if there
+    are none) and the divergence facts."""
+    res = passes.run_pass1(segments, starts, cfg, q, forward_only=True, filter_name=filter_name)
     vals = [s.nis[s.nis_keep] for s in res.segments if not s.diverged and s.nis_keep is not None]
     kept = np.concatenate(vals) if vals else np.empty(0)
     return {"mean_nis": float(np.mean(kept)) if kept.size else None, "n_samples": int(kept.size),
@@ -70,9 +71,9 @@ def recording_nis(segments, starts, cfg, q):
 def _nis_worker(payload):
     """Top-level so that the Windows spawn start method can import it; one BLAS thread per worker."""
     from threadpoolctl import threadpool_limits
-    segments, starts, cfg, q = payload
+    segments, starts, cfg, q, filter_name = payload
     with threadpool_limits(limits=1):
-        return recording_nis(segments, starts, cfg, q)
+        return recording_nis(segments, starts, cfg, q, filter_name)
 
 
 # ---- cache -------------------------------------------------------------------------------------------------
@@ -105,8 +106,8 @@ def arrays_key(segments, starts):
     return "arrays:" + h.hexdigest()
 
 
-def cache_key(rec_key, q, cfg):
-    payload = "\n".join(["qr", rec_key, repr(float(q)), code_hash(), filter_fingerprint(cfg)])
+def cache_key(rec_key, q, cfg, filter_name=None):
+    payload = "\n".join(["qr", rec_key, repr(float(q)), str(filter_name), code_hash(), filter_fingerprint(cfg)])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -221,11 +222,13 @@ def select_q(entries, ids, keys, grid, cfg, min_recordings=None):
 
 # ---- the core: run the grid and select -----------------------------------------------------------------------
 
-def tune_q(recordings, cfg, cache_dir=None, n_jobs=1, min_recordings=None):
+def tune_q(recordings, cfg, cache_dir=None, n_jobs=1, min_recordings=None, filter_name=None):
     """Tune q on a list of recordings. Each is a dict {"id", "segments", "starts"[, "key"]} or a tuple
     (id, segments, starts). Used unchanged for the 20 real training recordings of a split seed and for the
     20-series synthetic G0 tuning set (Stage E). With a cache_dir, every (recording, q) result is stored and
-    reused (the result does not depend on the split seed). n_jobs > 1 runs joblib/loky workers."""
+    reused (the result does not depend on the split seed). n_jobs > 1 runs joblib/loky workers. filter_name:
+    explicit, else g0.filter (F0); it is part of every cache key."""
+    filter_name = passes.resolve_filter(cfg, filter_name)
     recs = []
     for r in recordings:
         d = dict(zip(("id", "segments", "starts"), r)) if isinstance(r, (tuple, list)) else dict(r)
@@ -238,7 +241,7 @@ def tune_q(recordings, cfg, cache_dir=None, n_jobs=1, min_recordings=None):
     todo = []
     for i, r in enumerate(recs):
         for j, qv in enumerate(grid):
-            ck = cache_key(r["key"], qv, cfg)
+            ck = cache_key(r["key"], qv, cfg, filter_name)
             hit = _cache_read(cache_dir, ck)
             if hit is not None:
                 entries[i][j] = hit
@@ -246,7 +249,7 @@ def tune_q(recordings, cfg, cache_dir=None, n_jobs=1, min_recordings=None):
                 todo.append((i, j, ck))
     log.info("Q/R tuning: %d recordings x %d q = %d runs, %d cached, %d to run (n_jobs=%d)",
              len(recs), len(grid), len(recs) * len(grid), len(recs) * len(grid) - len(todo), len(todo), n_jobs)
-    payloads = [(recs[i]["segments"], recs[i]["starts"], cfg, float(grid[j])) for i, j, _ in todo]
+    payloads = [(recs[i]["segments"], recs[i]["starts"], cfg, float(grid[j]), filter_name) for i, j, _ in todo]
     if n_jobs > 1 and len(payloads) > 1:
         from joblib import Parallel, delayed
         results = Parallel(n_jobs=n_jobs, backend=cfg["compute"]["joblib_backend"])(
@@ -340,15 +343,20 @@ def qr_path(cfg, root, seed, pilot):
     return Path(root) / base / cfg["ukf"]["qr_rule"]["output_name_pattern"].format(seed=seed)
 
 
-def build_document(result, cfg, root, seed, order, skipped, pilot, gate):
+def build_document(result, cfg, root, seed, order, skipped, pilot, gate, filter_name=None):
     head, dirty = _git_state(root)
+    filter_name = passes.resolve_filter(cfg, filter_name)
+    adopted = filter_name != "19D"           # DEV-005: q is declared, the section 7.5 rule is only reported
     cfg_file = Path(root) / "config.yml"
     body = {"schema": 1, "split_seed": int(seed), "pilot": bool(pilot), "result": result.to_dict(),
             "subjects": [r["id"] for r in result.recordings], "skipped_subjects": skipped,
             "draw": {"order_head": order[:len(result.recordings) + len(skipped)],
                      "seed": int(cfg["ukf"]["qr_rule"]["draw_seed_offset"]) + int(seed),
                      "session": cfg["dataset"]["session_first"], "train_only": True},
-            "gate_low_confidence": bool(gate.get("low_confidence", False)) if isinstance(gate, dict) else False}
+            "gate_low_confidence": bool(gate.get("low_confidence", False)) if isinstance(gate, dict) else False,
+            "filter": filter_name,
+            "rule_role": "reported_not_used" if adopted else "selects_q",
+            "q_used": passes.resolve_q(cfg, None, filter_name) if adopted else None}
     prov = {"git_commit": head, "git_dirty": dirty, "code_sha256": code_hash(),
             "config_yml_sha256": hashlib.sha256(cfg_file.read_bytes()).hexdigest() if cfg_file.is_file() else None,
             "filter_fingerprint_sha256": hashlib.sha256(filter_fingerprint(cfg).encode()).hexdigest()}
@@ -370,11 +378,18 @@ def write_qr(path, doc, force=False):
     return "written"
 
 
-def run_real(cfg, root, seed, pilot=False, n_jobs=None, force=False, loader=None, pilot_ids=None):
-    """Real-data tuning for one split seed: gate check (skipped in pilot mode), the training-only draw,
-    the tuning, and outputs/qr_<seed>.json (pilot: results/pilot/). Not wired into main.py."""
+def run_real(cfg, root, seed, pilot=False, n_jobs=None, force=False, loader=None, pilot_ids=None, filter_name=None):
+    """Real-data NIS rule for one split seed: gate check (skipped in pilot mode), the training-only draw,
+    the tuning, and outputs/qr_<seed>.json (pilot: results/pilot/). Not wired into main.py.
+
+    For the adopted filter (A, DEV-005, DEV-006) the rule's q is REPORTED ONLY: downstream runs use
+    ukf.process_noise.q_fixed (passes.resolve_q), never this file; the document says so (rule_role, q_used)."""
     import main as main_mod
     root = Path(root)
+    filter_name = passes.resolve_filter(cfg, filter_name)
+    if filter_name != "19D":
+        log.warning("Q/R tuning with filter %s: the NIS rule is run for the report only; q used downstream is "
+                    "q_fixed = %s (DEV-005)", filter_name, passes.resolve_q(cfg, None, filter_name))
     gate = {} if pilot else check_gate(cfg, root)
     train = main_mod.training_subjects(seed, root, cfg)
     if pilot:
@@ -390,8 +405,8 @@ def run_real(cfg, root, seed, pilot=False, n_jobs=None, force=False, loader=None
     min_rec = min(int(cfg["ukf"]["qr_rule"]["min_recordings"]), len(chosen)) if pilot else None
     jobs = int(cfg["compute"]["joblib_n_jobs"]) if n_jobs is None else int(n_jobs)
     cache_dir = root / cfg["paths"]["cache_dir"] / cfg["ukf"]["qr_rule"]["cache_subdir"]
-    result = tune_q(chosen, cfg, cache_dir=cache_dir, n_jobs=jobs, min_recordings=min_rec)
-    doc = build_document(result, cfg, root, seed, order, skipped, pilot, gate)
+    result = tune_q(chosen, cfg, cache_dir=cache_dir, n_jobs=jobs, min_recordings=min_rec, filter_name=filter_name)
+    doc = build_document(result, cfg, root, seed, order, skipped, pilot, gate, filter_name=filter_name)
     status = write_qr(qr_path(cfg, root, seed, pilot), doc, force=force)
     log.info("Q/R tuning, split seed %s: q = %s (%s)", seed, result.q, status)
     return result
