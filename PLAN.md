@@ -394,6 +394,9 @@ Note (2026-10-01): UKF-only stage done, PySR stage NOT started and DEV-005 NOT d
 ### [x] E6. Operating-point diagnostic (synthetic only, diagnostic)
 Question: is the E5 failure caused by the matched operating points or by the pipeline? tools/e6_operating_point_diagnostic.py (no src or config change; results/pilot/e6_operating_point.json), tests/test_e6_operating_point.py (12 tests, 13 mutation checks), IMP-071. Arms: (a) E5 series reused, (b) fixed C7-style operating point with a light chain, (c) the same with the real chain. No PySR, no gate.json, no DEV-005 decision.
 
+### [x] E7. Zero-residual diagnostic (synthetic only, diagnostic)
+Question: does the planted product residual explain the remaining gain error? tools/e7_zero_residual_diagnostic.py (filters A and B only, 19D dropped; residual c = 0 inside the script; arms (i) the E6 fixed point and (ii) the E5 matched points; results/pilot/e7_zero_residual.json), tests/test_e7_zero_residual.py (8 tests, 9 mutation checks), IMP-072. No PySR, no gate.json, no DEV-005 decision.
+
 ---
 
 ## Stage F: Baseline (baseline.py)
