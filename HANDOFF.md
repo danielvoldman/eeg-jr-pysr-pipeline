@@ -14,7 +14,7 @@ Coupled two-node Jansen-Rit model fit to two bipolar resting-state EEG channels 
 - Do not re-litigate: Wilson-Cowan, single-channel E/I split, open-form PySR, UDE, 4-phase layout, section 16.5.3 not-adopted list, Jansen-Rit choice.
 
 ## State (verify: git log --oneline -15; git status; pytest -rs -q)
-HEAD = the docs commit that follows 824c8aa (see git log). Full suite: 816 passed, 1 skipped (C1 writer test), 3 deselected (pysr marker; pytest.ini excludes them; run `pytest -m pysr` before releases).
+HEAD = the docs commit that follows 824c8aa (see git log). Full suite: 816 passed, 1 skipped (tests/test_state_space.py:476, the write_initial_covariance writer test: neural_variance is already written; it is NOT a C1 scoring writer, the G1 results writer is new), 3 deselected (pysr marker; pytest.ini excludes them; run `pytest -m pysr` before releases).
 Recent commits (newest first): 824c8aa F1 (baseline.py, scoring_mask, IMP-075/076); dc48b4f F0 (filter A and q_fixed wired, DEV-006, IMP-074); 2f61362 golden numbers; c25886b; c24c937 DEV-005 adopted; 312f453/267339c E8; c710d66 E7; 58dc0ca E6; 335b505 E5; 6274038 E4; addf374 E3; fdeeb7c E2; 7f75020 E1; 999286c; c6c7f0b D2; 41c341f D1; 987cdd5 gate ordering; 9b5d9c4 Stage C closed; 4b134fd C8; d5b32f6 C7; f40fd8d C6; b93d488 C5; c1d2176 C3; a655db1/1c94e5b/06d84da C2.. ; Stage A/B earlier.
 Done: Stages 0, A, B, C (closed), D (D1 machinery, D2 PySR 2.6.0 / SymbolicRegression.jl 2.5.1 / Julia 1.11.9 under .venv, turbo stays false), E1-E4 and E5 UKF-only stage, E6-E8 diagnostics, F0 (dc48b4f) and F1 (824c8aa): Stage F closed.
 

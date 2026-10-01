@@ -75,9 +75,13 @@ def make_spec(cfg, filter_name, segments):
     return ukf_ext.spec_for(FILTER_KINDS[filter_name], segments, cfg)
 
 
-def _runners(filter_name, spec):
+def _runners(filter_name, spec, residual=None):
     """(run_filter, run_smoother) for the filter: ukf's own (looked up at call time) for 19D, the extended ones of
-    ukf_ext.make_runners (looked up now) for A and B. No global patching."""
+    ukf_ext.make_runners (looked up now) for A and B. No global patching. With a residual (M3, IMP-077) the NumPy
+    extended filter of ukf_resid (forward only; its smoother raises) for every filter name."""
+    if residual is not None:
+        from src import ukf_ext, ukf_resid
+        return ukf_resid.make_runners(spec if spec is not None else ukf_ext.Spec("N"), residual)
     if filter_name == "19D":
         return (lambda *a, **k: ukf.run_filter(*a, **k)), (lambda *a, **k: ukf.run_smoother(*a, **k))
     from src import ukf_ext
@@ -227,7 +231,7 @@ class RecordingResult:
 
 # ---- pass 1 -----------------------------------------------------------------------------------------
 
-def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, filter_name=None, spec=None):
+def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, filter_name=None, spec=None, residual=None):
     """Recording-level pass over the clean segments (§7.5). See the module docstring and IMP-030/031.
 
     filter_name / q: explicit, else config (g0.filter, ukf.process_noise.q_fixed); see resolve_filter, resolve_q. `spec`
@@ -235,12 +239,17 @@ def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, fi
 
     forward_only=True (C4, IMP-040) skips the smoother and the stored covariances: params is None, the
     parameter carry and the divergence rule are unchanged, and each segment carries its NIS and the mask
-    of samples after both burn-ins. The default is unchanged."""
+    of samples after both burn-ins. The default is unchanged.
+
+    residual (M3, G0.5, IMP-077): a state_space.ResidualHook added to dy4/dt inside the prediction; forward_only only,
+    because the NumPy filter that carries it has no smoother."""
     _check_inputs(segments, starts)
+    if residual is not None and not forward_only:
+        raise PassError("a residual run is forward-only (the filter that carries the residual has no smoother)")
     filter_name = resolve_filter(cfg, filter_name)
     q = resolve_q(cfg, q, filter_name)
     spec = make_spec(cfg, filter_name, segments) if spec is None and filter_name != "19D" else spec
-    run_filter, run_smoother = _runners(filter_name, spec)
+    run_filter, run_smoother = _runners(filter_name, spec, residual)
     layout = ss.make_layout(cfg) if layout is None else layout
     if layout.fixed_params is not None:
         raise PassError("pass 1 needs a layout with the parameters in the state")

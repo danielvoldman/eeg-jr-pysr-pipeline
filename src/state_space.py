@@ -14,6 +14,7 @@ a DelayBuffer of S(mean potential) of the source node, S of the mean and not the
 S. This module holds no sigma-point code, no filter update and no process noise.
 """
 import argparse
+import copy
 import json
 import logging
 import re
@@ -27,7 +28,7 @@ from numba import njit
 
 from src import model
 from src.config import DEFAULT_CONFIG_PATH, load_config
-from src.model import N_STATES, Y1, Y2
+from src.model import N_STATES, Y1, Y2, Y4
 
 log = logging.getLogger(__name__)
 
@@ -266,13 +267,18 @@ def _drift_kernel(Xn, p, drive, A, B, a, b, C1, C2, C3, C4, e0, v0, r, out):
                             a, b, C1, C2, C3, C4, e0, v0, r, out[i, lo:lo + N_STATES])
 
 
-def drift(X, s_delayed, layout, cfg):
+def drift(X, s_delayed, layout, cfg, residual=None, v_delayed=None):
     """Deterministic drift f(x, s_delayed) of the augmented state, shape like X.
 
     s_delayed is the EXOGENOUS delayed S of each node, shape (2,) or (n_points, 2):
     node 2's y4 bracket receives g12 * s_delayed[0], node 1's receives g21 * s_delayed[1].
     The parameter states have zero drift (their random walk is process noise, added by
     the filter, not here). A and B come from the point's own log_rho (§7.6).
+
+    residual (M3, G0.5, IMP-077): None leaves everything above untouched. Otherwise `residual.value(u_tgt, u_src, S_src)`
+    (shared by both nodes, §8.4; arrays over points, result in dy4/dt units) is ADDED to the y4 derivative of the target
+    node j (§8.3): u_tgt = y1 - y2 of node j at this point, u_src = the delayed y1 - y2 of the other node (`v_delayed`,
+    shape like s_delayed, read from the potential ring at the lag of s_delayed) and S_src = s_delayed of the other node.
     """
     X = np.asarray(X, dtype=np.float64)
     flat = np.ascontiguousarray(X.reshape(-1, layout.n))
@@ -288,6 +294,17 @@ def drift(X, s_delayed, layout, cfg):
     out = np.zeros_like(flat)
     _drift_kernel(np.ascontiguousarray(flat[:, :N_NEURAL]), p, drive, A, B, k["a"], k["b"],
                   k["C1"], k["C2"], k["C3"], k["C4"], k["e0"], k["v0"], k["r"], out)
+    if residual is not None:
+        if v_delayed is None:
+            raise StateSpaceError("a residual needs the delayed potentials v_delayed")
+        v = np.broadcast_to(np.asarray(v_delayed, dtype=np.float64), (flat.shape[0], N_NODES))
+        pot = potentials(flat[:, :N_NEURAL])
+        n_pts = flat.shape[0]
+        # both target nodes in ONE evaluation: rows 0..n-1 drive node 1 (source node 2), rows n..2n-1 drive node 2
+        r = np.asarray(residual.value(np.concatenate([pot[:, 0], pot[:, 1]]), np.concatenate([v[:, 1], v[:, 0]]),
+                                      np.concatenate([s[:, 1], s[:, 0]])), dtype=np.float64)
+        out[:, Y4] += r[:n_pts]
+        out[:, N_STATES + Y4] += r[n_pts:]
     return out.reshape(X.shape)
 
 
@@ -360,20 +377,57 @@ def substep_dt(cfg, n_substeps=None):
     return 1.0 / (cfg["preprocessing"]["observation_fs_hz"] * n), int(n)
 
 
-def predict(points, wm, buffer, layout, cfg, n_substeps=None):
+def make_potential_buffer(cfg):
+    """A DelayBuffer of the mean POTENTIAL y1 - y2 per node (not S of it), same length and indexing as make_buffer,
+    filled with the steady-state potential. It sits next to the S buffer for the M3 residual (u_src, IMP-077)."""
+    s = initial_node_state(cfg)
+    buf = DelayBuffer(cfg["coupling"]["delay_substeps"])
+    buf.reset(np.full(N_NODES, s[Y1] - s[Y2], dtype=np.float64))
+    return buf
+
+
+class ResidualHook:
+    """Base of the M3 residual (G0.5, IMP-077). A subclass supplies value(u_tgt, u_src, S_src) in dy4/dt units; the
+    filter that uses it owns `pots`, a make_potential_buffer ring that predict() writes after every sub-step and the
+    filter overwrites with the filtered mean after every update, exactly like the S buffer."""
+    pots = None
+
+    def value(self, u_tgt, u_src, S_src):
+        raise NotImplementedError
+
+    def bind(self, pots):
+        """A copy of this hook that owns the given potential ring (one per forward run, so no state is shared)."""
+        hook = copy.copy(self)
+        hook.pots = pots
+        return hook
+
+
+def predict(points, wm, buffer, layout, cfg, n_substeps=None, residual=None):
     """Propagate the points over one observation interval: Heun sub-steps, NO process noise.
 
     `wm` are the mean weights. After every sub-step the buffer gets S of the weighted
     mean potential (the predicted mean); the filter replaces the last entry by the
     filtered mean after its update (buffer.replace_latest). Returns the propagated points.
+
+    residual=None is the M1/M2 path, unchanged. A ResidualHook (M3, IMP-077) is added to dy4/dt inside both Heun stages
+    (see drift), reading its delayed potentials from residual.pots at the same lags as the S buffer.
     """
     dt, n_sub = substep_dt(cfg, n_substeps)
     X = np.array(points, dtype=np.float64, copy=True)
+    pots = None if residual is None else residual.pots
+    if residual is not None and pots is None:
+        raise StateSpaceError("the residual has no potential buffer")
     for _ in range(n_sub):
-        k1 = drift(X, buffer.read(buffer.delay), layout, cfg)
-        k2 = drift(X + dt * k1, buffer.read(buffer.delay - 1), layout, cfg)
+        if pots is None:
+            k1 = drift(X, buffer.read(buffer.delay), layout, cfg)
+            k2 = drift(X + dt * k1, buffer.read(buffer.delay - 1), layout, cfg)
+        else:
+            k1 = drift(X, buffer.read(buffer.delay), layout, cfg, residual, pots.read(pots.delay))
+            k2 = drift(X + dt * k1, buffer.read(buffer.delay - 1), layout, cfg, residual, pots.read(pots.delay - 1))
         X = X + 0.5 * dt * (k1 + k2)
         buffer.write(sigmoid_of_mean_potential(X, wm, cfg))
+        if pots is not None:
+            pots.write(np.asarray(wm, dtype=np.float64) @ potentials(X))
     return X
 
 

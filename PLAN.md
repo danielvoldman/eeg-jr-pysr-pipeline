@@ -424,6 +424,14 @@ Note (2026-10-01): done. src/baseline.py (M0: order 1-32 by 5-fold subject-wise 
 
 ## Stage G: Robustness and scoring (robustness.py)
 
+### [x] G0.5. Residual hook and frozen equation on disk (prerequisite of G1; IMP-077)
+Read: §8.1, §8.2, §8.3, §10.2, §18.1.
+Done when:
+- state_space.drift/predict accept a residual that is added to dy4/dt of the target node, with a zero residual bit-identical and M1/M2 keeping their Numba kernels unchanged.
+- The frozen equation has an on-disk writer and loader in regression.py, with a path in config, and the loader never imports PySR.
+
+Note (2026-10-01): done. state_space (ResidualHook, make_potential_buffer, drift/predict residual argument), src/ukf_resid.py (NumPy extended forward filter with the residual; the Numba files are untouched), passes.run_pass1(residual=..., forward_only only), regression (FrozenResidual, FrozenEquation, build/write/load, frozen_equation_path), config pysr.frozen_equation.*. tests/test_residual_hook.py (24 tests), 8 mutation checks. Nothing writes a frozen-equation file yet (the E5 PySR stage with filter A has not run).
+
 ### [ ] G1. C1 scoring
 Read: §10.2, §12, §13, §15.
 Done when:

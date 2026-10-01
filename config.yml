@@ -399,6 +399,9 @@ pysr:
     subject_fraction: {value: 0.5, prov: locked, ref: "§8.2"}
     refit_inside_bootstrap: {value: false, prov: locked, ref: "§8.2"}
   signature_rule: {value: "sympy additive components; multiplicative constants set to 1, additive constants inside function arguments set to 0; simplify", prov: locked, ref: "§8.4"}
+  frozen_equation:
+    output_pattern: {value: "frozen_equation_{seed}.json", prov: placeholder, ref: "§18.1, IMP-077", note: "the primary fit's frozen equation of one split seed, under paths.outputs_dir (pilot: paths.pilot_results_dir); written only by regression.write_frozen_equation"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-077"}
 
 # ---------------------------------------------------------------- synthetic gate G0 (§5.2, §9)
 g0:

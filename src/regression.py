@@ -18,6 +18,8 @@ test-function derivative; 'matched' smooths the base prediction with the same te
 kernel lies inside the kept samples of a window (no padding, nothing crosses a window edge).
 """
 import faulthandler
+import hashlib
+import json
 import logging
 import math
 import os
@@ -26,12 +28,14 @@ import time
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import sympy
 
 from src import model
 from src import passes
+from src import state_space as ss
 from src.config import REPO_ROOT
 
 log = logging.getLogger(__name__)
@@ -764,3 +768,133 @@ def fronts_equivalent(a, b, cfg):
         if not math.isclose(float(x.loss), float(y.loss), rel_tol=dc["loss_rtol"], abs_tol=0.0):
             return False
     return True
+
+
+# ---- the frozen equation on disk, and the residual the filter uses (G0.5; §8.2, §8.3, §18.1; IMP-077) -------------
+
+class FrozenEquationError(RegressionError):
+    """Raised for an unusable frozen-equation request."""
+
+
+def frozen_equation_path(cfg, root, seed, pilot):
+    fe = cfg["pysr"]["frozen_equation"]
+    base = cfg["paths"]["pilot_results_dir"] if pilot else cfg["paths"]["outputs_dir"]
+    return Path(root) / base / fe["output_pattern"].format(seed=seed)
+
+
+def build_frozen_document(record, cfg, root, split_seed, pilot):
+    """The on-disk form of a PRIMARY fit's frozen equation (a run_fit record): the selected equation text, the z-scoring
+    constants applied to every later row, the front, the subjects and seeds, and a provenance block. Never imports PySR."""
+    if record.get("role") != "primary":
+        raise FrozenEquationError(f"only the primary fit is frozen, got role {record.get('role')!r} (refits are never scored)")
+    for key in ("zscore", "no_term", "equation", "front", "fit_subjects", "val_subjects"):
+        if key not in record:
+            raise FrozenEquationError(f"the fit record has no {key!r}")
+    if not record["no_term"] and not record["equation"]:
+        raise FrozenEquationError("a selected term needs an equation")
+    from src import tuning
+    head, dirty = tuning._git_state(root)
+    root = Path(root)
+    cfg_file = root / "config.yml"
+    body = {"schema": int(cfg["pysr"]["frozen_equation"]["schema_version"]), "split_seed": int(split_seed),
+            "pilot": bool(pilot), "variable_names": list(VARIABLE_NAMES), "equation": record["equation"],
+            "no_term": bool(record["no_term"]), "reason": record.get("reason"), "complexity": record.get("complexity"),
+            "val_loss": record.get("val_loss"), "min_val_loss": record.get("min_val_loss"), "zscore": record["zscore"],
+            "signatures": list(record.get("signatures", [])), "fit_subjects": list(record["fit_subjects"]),
+            "val_subjects": list(record["val_subjects"]), "seeds": record.get("seeds"), "versions": record.get("versions"),
+            "front": record["front"], "fit_seconds": record.get("fit_seconds"), "n_fit_rows": record.get("n_fit_rows"),
+            "n_val_rows": record.get("n_val_rows")}
+    prov = {"git_commit": head, "git_dirty": dirty,
+            "code_sha256": hashlib.sha256((Path(__file__).resolve()).read_bytes()).hexdigest(),
+            "config_yml_sha256": hashlib.sha256(cfg_file.read_bytes()).hexdigest() if cfg_file.is_file() else None}
+    return dict(body, provenance=prov)
+
+
+def write_frozen_equation(path, doc, force=False):
+    """Write once. An identical result (everything but the provenance block) is left alone; a different one is refused
+    unless force (a deviation: a frozen equation is never silently replaced). Returns "written" or "unchanged"."""
+    path = Path(path)
+    new = json.loads(json.dumps(doc))
+    if path.is_file() and not force:
+        strip = lambda d: {k: v for k, v in d.items() if k != "provenance"}              # noqa: E731
+        if strip(json.loads(path.read_text(encoding="utf-8"))) == strip(new):
+            return "unchanged"
+        raise FrozenEquationError(f"{path} exists with a different equation; pass force to overwrite (a deviation)")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(new, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
+    tmp.replace(path)
+    return "written"
+
+
+class FrozenResidual(ss.ResidualHook):
+    """The frozen equation as the filter's residual: value(u_tgt, u_src, S_src) = mean_y + sd_y * f(z-scored inputs and
+    their three pairwise products), in dy4/dt units (the training target was z-scored by the fit fold's constants, §8.2)."""
+
+    def __init__(self, text, zscore):
+        self.text = text
+        self.z = zscore
+        self._fn = sympy.lambdify([sympy.Symbol(n) for n in VARIABLE_NAMES], parse_equation(text), modules=["numpy"])
+
+    def value(self, u_tgt, u_src, S_src):
+        X = np.column_stack([np.asarray(u_tgt, dtype=np.float64), np.asarray(u_src, dtype=np.float64),
+                             np.asarray(S_src, dtype=np.float64)])
+        Xz = (X - self.z.mean_X) / self.z.sd_X
+        cols = [Xz[:, i] for i in range(N_INPUTS)] + [Xz[:, a] * Xz[:, b] for a, b in PRODUCT_PAIRS]
+        with np.errstate(all="ignore"):
+            f = self._fn(*cols)
+        f = np.broadcast_to(np.asarray(f, dtype=np.float64), (X.shape[0],))
+        return self.z.mean_y + self.z.sd_y * f
+
+
+@dataclass
+class FrozenEquation:
+    doc: dict
+    sha256: str
+    path: object = None
+
+    @property
+    def no_term(self):
+        return bool(self.doc["no_term"])
+
+    @property
+    def equation(self):
+        return self.doc["equation"]
+
+    @property
+    def split_seed(self):
+        return int(self.doc["split_seed"])
+
+    @property
+    def zscore(self):
+        z = self.doc["zscore"]
+        return ZScore(mean_X=np.asarray(z["mean_X"], dtype=np.float64), sd_X=np.asarray(z["sd_X"], dtype=np.float64),
+                      mean_y=float(z["mean_y"]), sd_y=float(z["sd_y"]), n=int(z["n"]))
+
+    def residual(self):
+        """The filter residual; None for 'no residual term' (a bare constant, §8.2): the scorer then treats M3 as M2."""
+        if self.no_term:
+            return None
+        return FrozenResidual(self.equation, self.zscore)
+
+
+def load_frozen_equation(path):
+    """Read a frozen-equation file (PySR is never imported). Raises on a missing file or an incomplete document."""
+    path = Path(path)
+    if not path.is_file():
+        raise FrozenEquationError(f"{path} does not exist")
+    raw = path.read_bytes()
+    doc = json.loads(raw.decode("utf-8"))
+    for key in ("schema", "split_seed", "equation", "no_term", "zscore", "variable_names", "fit_subjects"):
+        if key not in doc:
+            raise FrozenEquationError(f"{path} has no {key!r}")
+    if list(doc["variable_names"]) != list(VARIABLE_NAMES):
+        raise FrozenEquationError(f"{path}: variable names {doc['variable_names']} are not {list(VARIABLE_NAMES)}")
+    z = doc["zscore"]
+    if len(z["mean_X"]) != N_INPUTS or len(z["sd_X"]) != N_INPUTS or not all(float(v) > 0.0 for v in z["sd_X"])             or not float(z["sd_y"]) > 0.0:
+        raise FrozenEquationError(f"{path}: the z-scoring constants are unusable")
+    if not doc["no_term"]:
+        if not doc["equation"]:
+            raise FrozenEquationError(f"{path}: a selected term has no equation")
+        parse_equation(doc["equation"])
+    return FrozenEquation(doc=doc, sha256=hashlib.sha256(raw).hexdigest(), path=path)
