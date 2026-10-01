@@ -364,11 +364,13 @@ Done when:
 
 Note (2026-09-30): done; src/synthetic_gate.py (planted kernel, run_planted, null_b_input, generate_series, tuning_set, tune_g0_q for 19D, time_one_series), tests/test_synthetic_gate_series.py (21 tests, 8 mutation checks), config g0.seeds.arm_codes / substreams, series_duration_s, generation_burn_in_s, backend, tuning_level_index, n_tuning_series, IMP-064 and IMP-065. One series (19-D, Numba) takes about 1 s to generate and 12.9 s for both passes with the state-SD flag off; with the standard rule ON that series diverged at step 187 and would count as failed. Realised planted RMS ratio 0.46 to 0.53 at L1 to L3 but 0.76 to 0.84 at L4. Run `python -m src.synthetic_gate --time-series --pilot`.
 
-### [ ] E3. Preprocessing-gate artifacts
+### [x] E3. Preprocessing-gate artifacts
 Read: §5.2.
 Done when:
 - Blinks, EMG bursts and drift are injected at the stated settings.
 - The artifact-only null uses bilateral, near-zero-lag artifacts.
+
+Note (2026-10-01): done; src/synthetic_gate.py (artifact_signal, blink_wave, emg_carrier, generate_series artifacts / arm artifact_null, preprocessing_gate_set, null_pass, preprocessing_bias_verdict, time_gate_series), tests/test_synthetic_gate_artifacts.py (20 tests, 9 mutation checks), config g0.preprocessing_gate.* leaves, IMP-066 (E2 review decisions) and IMP-067. Run `python -m src.synthetic_gate --time-gate-series --pilot`. One gate series takes about 1.5 to 1.8 s to generate and about 15 s with both passes (flag off); the 30%-of-SD EMG bursts are mostly not removed by the 5x screen (7 and 8 of 240 segments rejected). The PySR part of the bias verdict (NRMSE) and the series' estimates come in E4 / E5.
 
 ### [ ] E4. Gate scoring and gate.json
 Read: §9.1–§9.4, §5.2, §18.1, §20.

@@ -1,5 +1,6 @@
-"""Synthetic gate G0 (PLAN.md Stage E; §5.2, §9, §18.1). This file holds E1 (the operating-regime grid) and E2
-(series generator, Null A, Null B, the G0 tuning set).
+"""Synthetic gate G0 (PLAN.md Stage E; §5.2, §9, §18.1). This file holds E1 (the operating-regime grid), E2
+(series generator, Null A, Null B, the G0 tuning set) and E3 (the artifacts of the preprocessing gate and its bias
+scoring).
 
 E1 (§9.1, "operating regime matched to real data"): a grid of simulations over (p, input-noise SD, additive
 observation-noise level), 12 x 8 x 5 by default, each reduced to three SCALE-FREE features (alpha peak
@@ -20,8 +21,14 @@ edge trim and segment_signal (blinks, 1-s rejection, anti-aliased downsampling, 
 Null A has zero coupling and no planted term; Null B adds a shared input with a lag of 0-20 ms carrying 30-50% of
 each node's input variance. Every random draw is default_rng([block + round x stride, arm, substream, i]).
 
+E3 (§5.2): artifact_signal() adds blinks, EMG bursts and 0.05 Hz drift in uV before the real preprocessing; the
+positive arm draws them independently per channel, the artifact-only null (zero coupling) draws ONE set that hits both
+channels with a 0-4 ms lag and a shared carrier. preprocessing_bias_verdict() scores the signed median bias of the gains
+and of the E/I ratio (p excluded).
+
 Entry points: python -m src.synthetic_gate --grid-report --pilot
               python -m src.synthetic_gate --time-series --pilot
+              python -m src.synthetic_gate --time-gate-series --pilot
 """
 import copy
 import hashlib
@@ -577,11 +584,14 @@ class Series:
         return out
 
 
-def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None, with_truth=True):
-    """One synthetic series of arm 'positive', 'null_A' or 'null_B' (§9.1, §9.2); see the module docstring."""
+def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None, with_truth=True, artifacts=None):
+    """One synthetic series of arm 'positive', 'null_A', 'null_B' or 'artifact_null' (§9.1, §9.2, §5.2); see the module
+    docstring. artifacts: None, 'independent' or 'bilateral' (the artifact-only null always uses 'bilateral')."""
     import time
-    if arm not in ("positive", "null_A", "null_B"):
+    if arm not in ("positive", "null_A", "null_B", "artifact_null"):
         raise GateError(f"unknown arm {arm!r}")
+    if artifacts not in (None, "independent", "bilateral"):
+        raise GateError(f"unknown artifact mode {artifacts!r}")
     if arm == "positive" and level_index is None:
         level_index = int(i) % len(cfg["g0"]["coupling_levels_x_C2"])
     g0 = cfg["g0"]
@@ -613,6 +623,10 @@ def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None
     z = observe_noisy(cfg, y, fs, m, op["noise_share"], grid.exponent, series_rng(cfg, stream, arm, "noise", i, round_))
     x_uv, factor = scale_to_uv(cfg, z, fs, table.target_sd_uv)
     meta["uv_factor"] = [float(v) for v in factor]
+    mode = "bilateral" if arm == "artifact_null" else artifacts
+    if mode is not None:
+        art, meta["artifacts"] = artifact_signal(cfg, series_rng(cfg, stream, arm, "artifacts", i, round_), x_uv, fs, mode)
+        x_uv = x_uv + art
     t_obs = time.perf_counter()
     res = preprocess_series(cfg, x_uv, fs)
     t_pre = time.perf_counter()
@@ -706,6 +720,219 @@ def time_one_series(cfg, root):
     return s
 
 
+# ---------------------------------------------------------------- E3: artifacts of the preprocessing gate (§5.2)
+
+def _event_times(rng, rate_per_s, duration_s):
+    """Event times of a Poisson process (exponential inter-arrival times) on [0, duration_s)."""
+    times, t = [], 0.0
+    while True:
+        t += float(rng.exponential(1.0 / rate_per_s))
+        if t >= duration_s:
+            return times
+        times.append(t)
+
+
+def _add(channel, start, wave):
+    """Add wave at sample index start, clipped to the channel; negative starts are cut."""
+    n = channel.shape[0]
+    a, b = max(start, 0), min(start + wave.shape[0], n)
+    if a < b:
+        channel[a:b] += wave[a - start:b - start]
+
+
+def blink_wave(cfg, fs_hz):
+    """One blink: raised cosine of blink.duration_s with peak blink.amplitude_uv (uV)."""
+    bk = cfg["g0"]["preprocessing_gate"]["blink"]
+    n = int(round(bk["duration_s"] * fs_hz))
+    return bk["amplitude_uv"] * 0.5 * (1.0 - np.cos(2.0 * np.pi * np.arange(n) / (n - 1)))
+
+
+def emg_carrier(cfg, rng, n, fs_hz):
+    """Unit-RMS Gaussian noise band-passed (zero phase) to emg.band_hz, n samples, ramped at both ends."""
+    from scipy.signal import butter, sosfiltfilt
+    pg = cfg["g0"]["preprocessing_gate"]
+    lo, hi = pg["emg"]["band_hz"]
+    sos = butter(pg["emg_filter_order"], [lo, hi], btype="band", fs=fs_hz, output="sos")
+    pad = int(round(0.5 * fs_hz))
+    x = sosfiltfilt(sos, rng.standard_normal(n + 2 * pad))[pad:pad + n]
+    x = x / np.sqrt(np.mean(x ** 2))
+    ramp = min(int(round(pg["emg_taper_s"] * fs_hz)), n // 2)
+    env = np.ones(n)
+    env[:ramp] = 0.5 * (1.0 - np.cos(np.pi * np.arange(ramp) / ramp))
+    env[n - ramp:] = env[:ramp][::-1]
+    return x * env
+
+
+def artifact_signal(cfg, rng, x_uv, fs_hz, mode):
+    """The §5.2 artifacts in uV for two channels: blinks (0.3 s, 30 uV, about 1 per 15 s), EMG bursts (20-150 Hz,
+    1-3 s, RMS 30% of the channel SD, about 3 per minute) and slow drift (0.05 Hz, 50 uV).
+    mode 'independent': events, carriers and phases drawn separately per channel (positive arm).
+    mode 'bilateral': ONE set of events, carriers and drift phase hits both channels; the second channel receives
+    them lag_steps later (lag ~ U(bilateral_lag_ms)) and each channel has its own amplitude factor
+    ~ U(bilateral_amplitude_factor) (artifact-only null). Returns (art (2, n), meta)."""
+    if mode not in ("independent", "bilateral"):
+        raise GateError(f"unknown artifact mode {mode!r}")
+    pg = cfg["g0"]["preprocessing_gate"]
+    n = x_uv.shape[1]
+    T = n / fs_hz
+    sd = x_uv.std(axis=1, ddof=1)
+    art = np.zeros((2, n))
+    wave = blink_wave(cfg, fs_hz)
+    bl, em, dr = pg["blink"], pg["emg"], pg["drift"]
+    t = np.arange(n) / fs_hz
+    meta = {"mode": mode}
+    if mode == "bilateral":
+        lag = int(round(rng.uniform(*pg["bilateral_lag_ms"]) * 1e-3 * fs_hz))
+        fac = rng.uniform(*pg["bilateral_amplitude_factor"], size=2)
+        blinks = _event_times(rng, bl["rate_per_s"], T)
+        bursts = [(s0, rng.uniform(*em["duration_s"])) for s0 in _event_times(rng, em["rate_per_min"] / 60.0, T)]
+        carriers = [emg_carrier(cfg, rng, int(round(d * fs_hz)), fs_hz) for _, d in bursts]
+        phase = rng.uniform(0.0, 2.0 * np.pi)
+        for ch in (0, 1):
+            shift = lag if ch == 1 else 0
+            for t0 in blinks:
+                _add(art[ch], int(round(t0 * fs_hz)) + shift, fac[ch] * wave)
+            for (s0, _), car in zip(bursts, carriers):
+                _add(art[ch], int(round(s0 * fs_hz)) + shift, fac[ch] * em["rms_fraction_of_channel_sd"] * sd[ch] * car)
+            art[ch] += fac[ch] * dr["amplitude_uv"] * np.sin(2.0 * np.pi * dr["freq_hz"] * (t - shift / fs_hz) + phase)
+        meta.update(lag_steps=lag, factors=[float(v) for v in fac], n_blinks=len(blinks), n_emg=len(bursts))
+    else:
+        counts = {"n_blinks": 0, "n_emg": 0}
+        for ch in (0, 1):
+            for t0 in _event_times(rng, bl["rate_per_s"], T):
+                _add(art[ch], int(round(t0 * fs_hz)), wave)
+                counts["n_blinks"] += 1
+            for s0 in _event_times(rng, em["rate_per_min"] / 60.0, T):
+                d = rng.uniform(*em["duration_s"])
+                car = emg_carrier(cfg, rng, int(round(d * fs_hz)), fs_hz)
+                _add(art[ch], int(round(s0 * fs_hz)), em["rms_fraction_of_channel_sd"] * sd[ch] * car)
+                counts["n_emg"] += 1
+            art[ch] += dr["amplitude_uv"] * np.sin(2.0 * np.pi * dr["freq_hz"] * t + rng.uniform(0.0, 2.0 * np.pi))
+        meta.update(counts)
+    return art, meta
+
+
+# ---------------------------------------------------------------- E3: scoring of the preprocessing gate (§5.2)
+
+def null_pass(cfg, g12, g21, has_term):
+    """§9.2 null rule, also the artifact-only null's rule (§5.2): no residual term AND both estimated gains strictly
+    inside delta of zero. A series without estimates (diverged) is passed as None and fails."""
+    if g12 is None or g21 is None:
+        return False
+    d = delta(cfg)
+    return (not has_term) and abs(g12) < d and abs(g21) < d
+
+
+def _signed_error(est, truth):
+    """Signed relative error (est - truth) / truth; a missing estimate (diverged series) counts as +inf (IMP-066)."""
+    return float("inf") if est is None else float((est - truth) / truth)
+
+
+def preprocessing_bias_verdict(cfg, records):
+    """Positive arm of the preprocessing gate (§5.2): the SIGNED median relative bias of the coupling gains (g12 and g21
+    pooled) and of the E/I ratio rho = A / B (both nodes pooled) against the truth, over the series from level
+    g0.preprocessing_gate.bias_from_level_index up, must lie within +-bias_tolerance; p is excluded (only meaningful
+    against the fixed rescaling reference). Each record: level_index, g_true, g12, g21, rho1, rho2 (None when the
+    series diverged) and optionally nrmse. If every eligible record carries an nrmse the median must also be
+    <= g0.pass.median_nrmse_max, else the verdict is None (the PySR part is pending).
+    E/I truth is the LITERATURE value A / B (the generator does not vary it), so shrinkage of the estimate toward the
+    prior mean, which is the same value, is invisible to this check (reported in the verdict)."""
+    pg = cfg["g0"]["preprocessing_gate"]
+    tol = pg["bias_tolerance"]
+    rho_true = cfg["jansen_rit"]["A"] / cfg["jansen_rit"]["B"]
+    elig = [r for r in records if r["level_index"] >= pg["bias_from_level_index"]]
+    if not elig:
+        raise GateError("no eligible series for the preprocessing bias")
+    g_err = [e for r in elig for e in (_signed_error(r["g12"], r["g_true"]), _signed_error(r["g21"], r["g_true"]))]
+    ei_err = [e for r in elig for e in (_signed_error(r["rho1"], rho_true), _signed_error(r["rho2"], rho_true))]
+    gain_bias, ei_bias = float(np.median(g_err)), float(np.median(ei_err))
+    out = {"n_series": len(elig), "n_diverged": int(sum(r["g12"] is None for r in elig)),
+           "gain_bias": gain_bias, "ei_bias": ei_bias, "tolerance": tol,
+           "gain_ok": abs(gain_bias) <= tol, "ei_ok": abs(ei_bias) <= tol, "p_excluded": True,
+           "rho_true": rho_true,
+           "ei_note": "E/I truth is the literature value A/B (not varied by the generator); shrinkage toward the "
+                      "prior, whose mean is the same value, is invisible to this check",
+           "per_level": {}}
+    for lv in sorted({r["level_index"] for r in elig}):
+        rs = [r for r in elig if r["level_index"] == lv]
+        out["per_level"][int(lv)] = {
+            "n": len(rs),
+            "gain_bias": float(np.median([e for r in rs for e in (_signed_error(r["g12"], r["g_true"]),
+                                                                    _signed_error(r["g21"], r["g_true"]))])),
+            "ei_bias": float(np.median([e for r in rs for e in (_signed_error(r["rho1"], rho_true),
+                                                                  _signed_error(r["rho2"], rho_true))]))}
+    nr = [r.get("nrmse") for r in elig]
+    if all(v is not None for v in nr):
+        out["nrmse_median"] = float(np.median(nr))
+        out["nrmse_ok"] = out["nrmse_median"] <= cfg["g0"]["pass"]["median_nrmse_max"]
+        out["pass"] = bool(out["gain_ok"] and out["ei_ok"] and out["nrmse_ok"])
+    else:
+        out["nrmse_median"], out["nrmse_ok"] = None, None
+        out["pass"] = False if not (out["gain_ok"] and out["ei_ok"]) else None
+    return out
+
+
+def preprocessing_gate_set(cfg, grid, table, round_=0):
+    """The 20 positive and 20 artifact-only null series of the preprocessing gate (§9.4): positive series carry the
+    §5.2 artifacts per g0.preprocessing_gate.positive_artifact_mode (5 per level), the null series have zero coupling and
+    bilateral near-zero-lag artifacts. Seeds from block g0.seeds.preprocessing_gate."""
+    mode = cfg["g0"]["preprocessing_gate"]["positive_artifact_mode"]
+    pos = [generate_series(cfg, "positive", i, grid, table, "preprocessing_gate", round_, artifacts=mode)
+           for i in range(cfg["g0"]["n_preprocessing_gate_positive"])]
+    nul = [generate_series(cfg, "artifact_null", i, grid, table, "preprocessing_gate", round_)
+           for i in range(cfg["g0"]["n_preprocessing_gate_null"])]
+    return pos, nul
+
+
+def time_gate_series(cfg, root):
+    """Generate one gate positive and one artifact-only null series, report what the real preprocessing did to the
+    artifacts, and time both UKF passes (19-D, Numba; the standard rule ON and, for the timing only, the state-SD
+    flag disabled in a copy)."""
+    import time
+    from src import passes
+    root = Path(root)
+    split = load_split(cfg, root)
+    pilot_ids = pp.load_pilot_ids(cfg, root)
+    table = build_feature_table(cfg, sorted(pilot_ids), split, make_recording_loader(cfg, root, pilot_ids))
+    grid = build_grid(cfg, table.exponent, root / cfg["paths"]["cache_dir"] / cfg["g0"]["cache_subdir"],
+                      cfg["compute"]["joblib_n_jobs"])
+    gc = g0_cfg(cfg)
+    warm = copy.deepcopy(gc)
+    warm["g0"]["series_duration_s"] = 12
+    w = generate_series(warm, "positive", 0, grid, table, "pilot", with_truth=False)
+    passes.run_recording([w.segments[0][:, :20 * 256]], [0], warm, 1e-2)
+    off = copy.deepcopy(gc)
+    off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
+    mode = cfg["g0"]["preprocessing_gate"]["positive_artifact_mode"]
+    emit("== E3: one preprocessing-gate positive and one artifact-only null series (19-D, Numba, q = 1e-2, timing only) ==")
+    for label, arm, art in (("positive (i = 2, L3)", "positive", mode), ("artifact-only null (i = 0)", "artifact_null", None)):
+        t = time.perf_counter()
+        s = generate_series(gc, arm, 2 if arm == "positive" else 0, grid, table, "preprocessing_gate", artifacts=art)
+        t_gen = time.perf_counter() - t
+        lg = s.meta["preprocessing_log"]
+        emit(f"-- {label}: artifacts {s.meta.get('artifacts')}")
+        emit(f"   real preprocessing: blinks {lg['blinks']}; rejected segments {lg['rejected_segments']} of {lg['n_segments']} "
+             f"({lg['rejected_before_padding_s']:.0f} s, {lg['rejected_after_padding_s']:.0f} s after padding); rules "
+             f"{ {k: v['n_segments'] for k, v in lg['rules'].items()} }; clean {lg['clean_s']:.0f} s in {lg['n_clean_segments']} segments")
+        emit(f"   summary {s.summary()}")
+        on = passes.run_pass1(s.segments, s.starts, gc, 1e-2, forward_only=True)
+        t = time.perf_counter()
+        p1 = passes.run_pass1(s.segments, s.starts, off, 1e-2)
+        t_p1 = time.perf_counter() - t
+        t = time.perf_counter()
+        p2 = passes.run_pass2(s.segments, s.starts, p1.params, off, 1e-2) if p1.params is not None else None
+        t_p2 = time.perf_counter() - t
+        emit(f"   generation {t_gen:.2f} s (simulate {s.meta['timing_s']['simulate']:.2f}, observe+scale+artifacts "
+             f"{s.meta['timing_s']['observe_and_scale']:.2f}, real preprocessing {s.meta['timing_s']['preprocess']:.2f}); "
+             f"flag-off pass 1 {t_p1:.2f} s, pass 2 {t_p2:.2f} s, total {t_gen + t_p1 + t_p2:.2f} s")
+        emit(f"   standard rule ON: recording diverged {on.recording_diverged} (fraction {on.diverged_fraction:.3f}), "
+             f"segments diverged {sum(sg.diverged for sg in on.segments)} of {len(on.segments)}")
+        if p1.params is not None:
+            emit(f"   DIAGNOSTIC ONLY (flag off): smoothed g12 {p1.params.g12:.2f}, g21 {p1.params.g21:.2f} "
+                 f"(truth {s.gains[0]:.2f}); rho {p1.params.rho1:.3f}, {p1.params.rho2:.3f} "
+                 f"(truth {cfg['jansen_rit']['A'] / cfg['jansen_rit']['B']:.3f}); pass 2 windows {len(p2.windows) if p2 else None}")
+
+
 # ---------------------------------------------------------------- the E1 report
 
 def grid_report(cfg, root, pilot, n_jobs=None):
@@ -765,6 +992,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="G0 synthetic gate (E1: regime grid report)")
     ap.add_argument("--grid-report", action="store_true")
     ap.add_argument("--time-series", action="store_true")
+    ap.add_argument("--time-gate-series", action="store_true")
     ap.add_argument("--pilot", action="store_true")
     ap.add_argument("--n-jobs", type=int, default=None)
     args = ap.parse_args(argv)
@@ -777,6 +1005,11 @@ def main(argv=None):
         if not args.pilot:
             raise GateError("the timing run is wired for --pilot only")
         time_one_series(cfg, REPO_ROOT)
+        return 0
+    if args.time_gate_series:
+        if not args.pilot:
+            raise GateError("the timing run is wired for --pilot only")
+        time_gate_series(cfg, REPO_ROOT)
         return 0
     ap.error("nothing to do")
 

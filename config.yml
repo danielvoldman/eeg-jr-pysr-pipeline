@@ -468,6 +468,13 @@ g0:
     blink: {value: {duration_s: 0.3, amplitude_uv: 30, rate_per_s: 0.0667}, prov: placeholder, ref: "§5.2", note: "about 1 per 15 s"}
     emg: {value: {band_hz: [20, 150], duration_s: [1, 3], rms_fraction_of_channel_sd: 0.30, rate_per_min: 3}, prov: placeholder, ref: "§5.2"}
     drift: {value: {freq_hz: 0.05, amplitude_uv: 50}, prov: placeholder, ref: "§5.2"}
+    blink_shape: {value: "raised cosine (Hann) of blink.duration_s, positive peak at blink.amplitude_uv", prov: placeholder, ref: "§5.2, IMP-067", note: "the document gives duration, amplitude and rate only"}
+    emg_filter_order: {value: 4, prov: placeholder, ref: "§5.2, IMP-067", note: "Butterworth band-pass of the EMG carrier (zero phase), emg.band_hz"}
+    emg_taper_s: {value: 0.05, prov: placeholder, ref: "§5.2, IMP-067", note: "raised-cosine ramps at both ends of a burst"}
+    bilateral_lag_ms: {value: [0, 4], prov: placeholder, ref: "§5.2, IMP-067", note: "artifact-only null: the second channel receives the artifacts this much later; one lag per series, uniform"}
+    bilateral_amplitude_factor: {value: [0.7, 1.3], prov: placeholder, ref: "§5.2, IMP-067", note: "artifact-only null: per-channel amplitude factor, uniform"}
+    positive_artifact_mode: {value: "independent", prov: placeholder, ref: "§5.2, IMP-067", note: "positive arm: blinks, EMG and drift drawn independently per channel (the document does not say)"}
+    bias_from_level_index: {value: 1, prov: placeholder, ref: "§5.2, IMP-067", note: "bias and NRMSE are evaluated from the second-weakest level up (15 of the 20 series)"}
     sensitivity_subjects: {value: 20, prov: locked, ref: "§5.2"}
     sensitivity_variants: {value: 4, prov: locked, ref: "§5.2", note: "high-pass 0.5 vs 0.1 Hz, crossed with default vs strict rejection"}
 
