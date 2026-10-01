@@ -161,9 +161,9 @@ Note (2026-09-29): done. Rules applied per recording in this order: units check,
 
 ## Stage C: State-space model and UKF (model.py) [x] CLOSED 2026-09-30
 
-Stage C is closed. C1 to C5 are build steps. C4b, C4c, C4d, C6, C7 and C8 are read-only DIAGNOSTICS (no src or config change, nothing adopted): C4b d48d906, C4c e3db3fc, C4d c959251, C6 f40fd8d, C7 d5b32f6, C8 4b134fd. Their combined finding is DEV-005 (status OPEN, not adopted).
+Stage C is closed. C1 to C5 are build steps. C4b, C4c, C4d, C6, C7 and C8 are read-only DIAGNOSTICS (no src or config change, nothing adopted): C4b d48d906, C4c e3db3fc, C4d c959251, C6 f40fd8d, C7 d5b32f6, C8 4b134fd. Their combined finding is DEV-005 (ADOPTED 2026-10-01: candidate A).
 
-**GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked. Stages D to H (build steps) are not blocked.
+**[x] GATE: DEV-005 decision. DECIDED 2026-10-01 (Daniel Voldman): ADOPTED, candidate A** (per-channel slow OU coloured observation-noise state, 21-D pass 1, 14-D windows); the 19-D filter is dropped, B is not adopted, q = 1e-2 is pre-declared fixed for A, the divergence rule is unchanged. Evidence C4b to C8 and E5 to E8, the limits and the leaves changed are in DEV-005 and IMP-070 to IMP-073. The full G0 and the confirmatory run now use g0.filter = A.
 
 Note: Before any phase >= 2 gets a real runner: check_prerequisite must also read outputs/gate.json and carry any low_confidence flag forward (CLAUDE.md rule 6, §18.1). Add tqdm progress bars when phases have real work (§18).
 
@@ -342,7 +342,7 @@ Note (2026-09-30): done in two parts. D1 commit: subject draws, seeds and the re
 
 Note (2026-09-30, from D2): the section 9.1 planted basis (potential / SD, NOT centred) has a mean of about 24 and an SD of about 12 in the test simulator, so after z-scoring the inputs it is mostly linear terms plus a product. When G0 recovery is scored, check that it is not trivially a linear term (the D2 marker test requires the product signature on an uncentred basis). No change to section 9.1.
 
-**GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked.
+**[x] GATE: DEV-005 decision. DECIDED 2026-10-01 (Daniel Voldman): ADOPTED, candidate A** (per-channel slow OU coloured observation-noise state, 21-D pass 1, 14-D windows); the 19-D filter is dropped, B is not adopted, q = 1e-2 is pre-declared fixed for A, the divergence rule is unchanged. Evidence C4b to C8 and E5 to E8, the limits and the leaves changed are in DEV-005 and IMP-070 to IMP-073. The full G0 and the confirmatory run now use g0.filter = A.
 
 ### [x] E1. Operating-regime grid
 Read: §9.1.
@@ -399,6 +399,10 @@ Question: does the planted product residual explain the remaining gain error? to
 
 ### [x] E8. Real pilot-data filter comparison (diagnostic, REAL pilot data)
 Question: how do 19D, A and B behave on the 12 real pilot recordings (ses-t1 only)? tools/e8_real_pilot_comparison.py (forward-only pass 1, Numba, q = 1e-2 and 1e-3, standard rule ON and state flag OFF inside the script; results/pilot/e8_real_pilot_comparison.json), tests/test_e8_real_pilot_comparison.py (11 tests, 13 mutation checks), IMP-073. The 19D numbers at q = 1e-2 reproduce C4b to C4d (y1 beyond 10 SD median 0.021, up to 39.5 SD, NIS median 2.06). No PySR, no gate.json, no src or config change, no DEV-005 decision.
+
+Note (2026-10-01): DEV-005 decided and recorded (docs and config only): adopt candidate A as the filter, 19-D dropped, B not adopted, q = 1e-2 pre-declared fixed. config.yml: g0.filter A (unset to locked), ukf.numba.enabled true (placeholder to locked, C5 validation accepted, DEV-004 tolerance), new ukf.process_noise.q_fixed 1e-2 (locked); no src file changed. Stage E state: E1 to E4 done; E5 stays open (its PySR stage, the parsimony measurement and the derivative-estimator comparison have not been run and now run on A); E6 to E8 are diagnostics. Expected at the full G0: the gain criterion fails and is reported as low confidence (section 20); a null failure would be a hard stop (DEV-005 limit 6). Still to do before the full G0: wire A into the real-data runner (passes.run_pass1 defaults to 19-D until the phase runners use filter_context), run the E5 PySR stage on A when approved, then the full G0 (60 positive, 60 + 60 null series) on fresh seeds.
+
+Next steps: Stage F (baseline: F1 VAR baselines), Stage G (robustness and scoring: G1 to G8), Stage H (figures). Stages D to H are build steps and are not blocked by the gate.
 
 ---
 
@@ -478,7 +482,7 @@ Done when:
 
 ## Stage I: Pilot (§17)
 
-**GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked.
+**[x] GATE: DEV-005 decision. DECIDED 2026-10-01 (Daniel Voldman): ADOPTED, candidate A** (per-channel slow OU coloured observation-noise state, 21-D pass 1, 14-D windows); the 19-D filter is dropped, B is not adopted, q = 1e-2 is pre-declared fixed for A, the divergence rule is unchanged. Evidence C4b to C8 and E5 to E8, the limits and the leaves changed are in DEV-005 and IMP-070 to IMP-073. The full G0 and the confirmatory run now use g0.filter = A.
 
 - [ ] Before the pilot, compute the exact observed ICC that corresponds to a CI lower bound of 0.40 at n = 42 (§15, C3).
 - [ ] Before the pilot, run the binomial check for any "X% of subjects" criterion at n = 33 (§11.5).

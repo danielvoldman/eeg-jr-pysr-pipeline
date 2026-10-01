@@ -282,8 +282,8 @@ def test_config_leaves_for_g0():
         assert isinstance(CFG["g0"]["seeds"][k], int)
     assert (CFG["g0"]["seeds"]["pilot"], CFG["g0"]["seeds"]["full"], CFG["g0"]["seeds"]["tuning"],
             CFG["g0"]["seeds"]["preprocessing_gate"]) == (91000, 92000, 93000, 94000)
-    assert CFG["g0"]["filter"] is None and CFG["g0"]["filter_options"] == ["19D", "A", "B"]
+    assert CFG["g0"]["filter"] == "A" and CFG["g0"]["filter_options"] == ["19D", "A", "B"]          # DEV-005 adopted A
     import yaml
     raw = yaml.safe_load((Path(__file__).resolve().parent.parent / "config.yml").read_text(encoding="utf-8"))
-    assert raw["g0"]["filter"]["prov"] == "unset"
+    assert raw["g0"]["filter"]["prov"] == "locked"
     assert raw["g0"]["seeds"]["pilot"]["prov"] == "placeholder"

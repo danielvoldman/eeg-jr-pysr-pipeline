@@ -19,6 +19,7 @@ from src.config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CFG = load_config()
+CFG["ukf"]["numba"]["enabled"] = False      # this module tests the NumPy REFERENCE filter (the default backend is Numba since DEV-005)
 SP = CFG["ukf"]["sigma_points"]
 MU_REF = CFG["rescaling"]["mu_ref"]
 SIGMA_REF = CFG["rescaling"]["sigma_ref"]

@@ -25,17 +25,19 @@ PRIOR = {"p1": 50.0, "p2": 50.0, "log_rho1": 0.2, "log_rho2": 0.2, "g12": 0.1 * 
 
 # ---- the switch --------------------------------------------------------------------------------------
 
-def test_pilot_runs_every_option_and_a_full_run_refuses_while_unset():
+def test_pilot_runs_every_option_and_a_full_run_uses_the_adopted_filter_and_refuses_when_unset():
     assert sg.gate_filters(CFG, True) == ["19D", "A", "B"]
-    with pytest.raises(sg.GateError, match="unset"):
-        sg.gate_filters(CFG, False)
+    assert sg.gate_filters(CFG, False) == ["A"]                              # DEV-005 adopted A
     c = copy.deepcopy(CFG)
-    c["g0"]["filter"] = "A"
-    assert sg.gate_filters(c, False) == ["A"] and sg.gate_filters(c, True) == ["19D", "A", "B"]
+    c["g0"]["filter"] = None
+    with pytest.raises(sg.GateError, match="unset"):
+        sg.gate_filters(c, False)
+    c["g0"]["filter"] = "B"
+    assert sg.gate_filters(c, False) == ["B"] and sg.gate_filters(c, True) == ["19D", "A", "B"]
     c["g0"]["filter"] = "C"
     with pytest.raises(sg.GateError):
         sg.gate_filters(c, False)
-    assert set(sg.FILTER_KINDS) == set(CFG["g0"]["filter_options"]) and CFG["g0"]["filter"] is None
+    assert set(sg.FILTER_KINDS) == set(CFG["g0"]["filter_options"]) and CFG["g0"]["filter"] == "A"
 
 
 def _series(seed=3, seconds=30.0, g=8.0):

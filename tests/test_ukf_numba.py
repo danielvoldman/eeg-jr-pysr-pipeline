@@ -431,18 +431,19 @@ def test_nis_and_tuning_statistic_are_unchanged_by_the_backend(recording, cfg_nu
 
 # ---- switch, determinism, hygiene ---------------------------------------------------------------------------------------------
 
-def test_default_is_numpy_the_switch_selects_numba_and_backend_overrides(layout, monkeypatch):
-    assert CFG["ukf"]["numba"]["enabled"] is False
+def test_default_is_numba_since_dev005_the_switch_selects_numpy_and_backend_overrides(layout, monkeypatch):
+    assert CFG["ukf"]["numba"]["enabled"] is True                       # DEV-005 / C5: Numba is the validated default
     called = []
     monkeypatch.setattr(ukf_numba, "run_filter", lambda *a, **k: called.append(1) or (_ for _ in ()).throw(RuntimeError("numba used")))
     z = series(0.5, 131)
-    ukf.run_filter(z, CFG, layout, Q)                                   # default: NumPy, the stub is not reached
-    assert not called
-    on = copy.deepcopy(CFG)
-    on["ukf"]["numba"]["enabled"] = True
     with pytest.raises(RuntimeError):
-        ukf.run_filter(z, on, layout, Q)
-    ukf.run_filter(z, on, layout, Q, backend="numpy")                    # explicit override wins over the switch
+        ukf.run_filter(z, CFG, layout, Q)                               # default: Numba, the stub is reached
+    off = copy.deepcopy(CFG)
+    off["ukf"]["numba"]["enabled"] = False
+    called.clear()
+    ukf.run_filter(z, off, layout, Q)                                   # switched off: NumPy, the stub is not reached
+    assert not called
+    ukf.run_filter(z, CFG, layout, Q, backend="numpy")                  # explicit override wins over the switch
     with pytest.raises(ukf.UKFError):
         ukf.run_filter(z, CFG, layout, Q, backend="cuda")
 

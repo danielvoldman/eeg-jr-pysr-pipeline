@@ -264,6 +264,7 @@ ukf:
     q_grid_high: {value: 1.0e-1, prov: placeholder, ref: "§7.6"}
     q_grid_n: {value: 8, prov: placeholder, ref: "§7.6", note: "log-spaced"}
     parameter_random_walk_factor: {value: 1.0e-3, prov: placeholder, ref: "§7.6", note: "variance per second = factor * prior variance"}
+    q_fixed: {value: 1.0e-2, prov: locked, ref: "DEV-005", note: "pre-declared fixed process-noise scale for the adopted filter A (decided 2026-10-01 on pilot-mode evidence, E5 to E8, not tuned on test data); the section 7.5 NIS rule is still run and its outcome (a refusal on the G0 tuning set under the standard rule, a diagnostic fallback at the grid edge, NIS 0.5 to 0.9) is reported alongside it; nothing reads this leaf yet (the real-data runner is a later stage)"}
   qr_rule:
     statistic: {value: "NIS closest to observation dimension", prov: locked, ref: "§7.5"}
     nis_target: {value: 2, prov: locked, ref: "§7.5"}
@@ -300,7 +301,7 @@ ukf:
     n_tau: {value: 80, prov: placeholder, ref: "DEV-005, IMP-068", note: "log grid, no optimizer"}
     s2_floor_fraction: {value: 1.0e-6, prov: placeholder, ref: "DEV-005, IMP-068", note: "a fit with no positive bin gets s2 = this fraction of the channel variance"}
   numba:
-    enabled: {value: false, prov: placeholder, ref: "§7.5, §21.2 #4", note: "IMP-044; false = the NumPy reference (default) until the C5 validation is accepted; ukf.run_filter(backend=...) overrides"}
+    enabled: {value: true, prov: locked, ref: "§7.5, §21.2 #4, DEV-004, DEV-005", note: "set true on 2026-10-01 (Daniel Voldman): the C5 validation is accepted (IMP-044, IMP-050; tests/test_ukf_numba.py against the NumPy path and filterpy; smoothed covariances at the DEV-004 tolerance rtol 1e-6, atol 1e-8, every other quantity at rtol 1e-8, atol 1e-10); candidate A exists only as a Numba kernel (ukf_ext); ukf.run_filter(backend=...) still overrides"}
     rtol: {value: 1.0e-8, prov: placeholder, ref: "§7.5"}
     atol: {value: 1.0e-10, prov: placeholder, ref: "§7.5"}
     rtol_smoothed_cov: {value: 1.0e-6, prov: placeholder, ref: "§7.5, DEV-004", note: "smoothed covariances only (predicted-covariance condition number about 1e8); every other quantity uses rtol"}
@@ -430,10 +431,10 @@ g0:
   series_duration_s: {value: 240, prov: placeholder, ref: "§9.4, IMP-065", note: "clean duration after the burn-in and the two edge trims; one 4-minute recording"}
   generation_burn_in_s: {value: 4, prov: placeholder, ref: "§9.1, IMP-065", note: "simulated and discarded; also the span over which the planted-term SD and RMS are measured"}
   gate_schema_version: {value: 1, prov: placeholder, ref: "§18.1, IMP-069"}
-  backend: {value: "numba", prov: placeholder, ref: "§16.5.2, IMP-065", note: "G0 runs on a config copy with ukf.numba.enabled = true; the global ukf.numba.enabled stays false until the pilot decides (section 21.2 #4)"}
+  backend: {value: "numba", prov: placeholder, ref: "§16.5.2, IMP-065", note: "G0 runs on a config copy with ukf.numba.enabled = true (the global switch is now true too, DEV-005, 2026-10-01)"}
   tuning_level_index: {value: 2, prov: placeholder, ref: "§7.5, IMP-065", note: "the G0 tuning set is generated like the positive control at this level of coupling_levels_x_C2 (index 2 = 0.10 x C2), with fresh seeds"}
   n_tuning_series: {value: 20, prov: locked, ref: "§7.5, §9.4"}
-  filter: {value: null, prov: unset, ref: "§7.5, DEV-005", note: "the filter model G0 runs (19D, A or B); the full run refuses while unset; decided by DEV-005, never hard-coded"}
+  filter: {value: "A", prov: locked, ref: "§7.5, DEV-005", note: "the filter model G0 runs (19D, A or B); decided by DEV-005 (ADOPTED 2026-10-01, Daniel Voldman): candidate A, a per-channel slow OU coloured observation-noise state, 21-D pass 1 and 14-D windows (IMP-068); 19D dropped, B not adopted; a full run still refuses if this is unset or not in filter_options"}
   filter_options: {value: ["19D", "A", "B"], prov: placeholder, ref: "DEV-005", note: "pilot mode runs and reports every option"}
   cache_subdir: {value: "g0", prov: placeholder, ref: "§18, IMP-063", note: "under paths.cache_dir"}
   regime:
@@ -570,4 +571,4 @@ open_questions_for_implementation:
   # decided in IMP-054 (residual.tv_weight_grid) and IMP-056 (pysr.subsample.seed and pysr.seeds)
   - "g0.seeds, aaft.seed: seed values"
   - "pysr.version: exact version to pin at setup"
-  - "ukf.numba.enabled: decided by the pilot validation (§21.2 #4)"
+  - "ukf.numba.enabled: decided by the pilot validation (§21.2 #4); set true in DEV-005 (2026-10-01)"

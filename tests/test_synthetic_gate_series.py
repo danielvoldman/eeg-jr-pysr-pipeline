@@ -304,7 +304,7 @@ def test_tune_g0_q_uses_the_numba_copy_and_routes_other_filters(world, monkeypat
     series = sg.tuning_set(c, grid, table, n=3)
     assert sg.tune_g0_q(c, series, "19D", n_jobs=1, min_recordings=3) == "result"
     assert seen["ids"] == ["tuning_0", "tuning_1", "tuning_2"] and seen["numba"] is True and seen["mr"] == 3
-    assert CFG["ukf"]["numba"]["enabled"] is False and c["ukf"]["numba"]["enabled"] is False   # global switch untouched
+    assert CFG["ukf"]["numba"]["enabled"] is True and c["ukf"]["numba"]["enabled"] is True     # global switch untouched (true since DEV-005)
     called = []
     monkeypatch.setattr(sg, "tune_g0_q_option", lambda cfg, ser, name, *a: called.append(name) or "option result")
     for other in ("A", "B"):                                                   # E4: A and B go through the gate's own worker
