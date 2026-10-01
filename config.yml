@@ -410,7 +410,36 @@ g0:
   n_pilot_null_B: {value: 20, prov: locked, ref: "§9.4"}
   n_preprocessing_gate_positive: {value: 20, prov: locked, ref: "§9.4"}
   n_preprocessing_gate_null: {value: 20, prov: locked, ref: "§9.4", note: "artifact-only null"}
-  seeds: {value: null, prov: unset, ref: "§9.4", note: "doc requires fresh seeds after any fix but gives no seed values"}
+  seeds:
+    pilot: {value: 91000, prov: placeholder, ref: "§9.4, IMP-063", note: "block base; series i of a stream uses default_rng([block, stream, i])"}
+    full: {value: 92000, prov: placeholder, ref: "§9.4, IMP-063"}
+    tuning: {value: 93000, prov: placeholder, ref: "§7.5, §9.4, IMP-063", note: "the G0 tuning set (Q/R only), never scored"}
+    preprocessing_gate: {value: 94000, prov: placeholder, ref: "§5.2, IMP-063"}
+    grid: {value: 95000, prov: placeholder, ref: "§9.1, IMP-063", note: "regime-grid simulations (E1); not named in the approval, added as its own block"}
+    fresh_round_stride: {value: 10000, prov: placeholder, ref: "§9.4, IMP-063", note: "added per fresh-seed round after any pipeline fix"}
+  filter: {value: null, prov: unset, ref: "§7.5, DEV-005", note: "the filter model G0 runs (19D, A or B); the full run refuses while unset; decided by DEV-005, never hard-coded"}
+  filter_options: {value: ["19D", "A", "B"], prov: placeholder, ref: "DEV-005", note: "pilot mode runs and reports every option"}
+  cache_subdir: {value: "g0", prov: placeholder, ref: "§18, IMP-063", note: "under paths.cache_dir"}
+  regime:
+    p_range: {value: [120, 320], prov: placeholder, ref: "§9.1, IMP-063", note: "12 values, linear; the document gives only the grid shape"}
+    input_sd_factor_range: {value: [0.25, 2.0], prov: placeholder, ref: "§9.1, IMP-063", note: "8 values, geometric; multiples of the Jansen-Rit input half-width (the uniform draw), so SD = half-width / sqrt(3)"}
+    noise_share_range: {value: [0.2, 0.8], prov: placeholder, ref: "§9.1, IMP-063", note: "5 values, linear; the 'observation-noise level' axis = share of the 1-45 Hz variance of the observed channel that is additive noise (1/f plus white)"}
+    one_over_f_fraction_of_noise: {value: 0.8, prov: placeholder, ref: "§9.1, IMP-063", note: "fixed 1/f : white split of the additive noise power (the rest is white)"}
+    grid_sim_duration_s: {value: 60, prov: placeholder, ref: "§9.1, IMP-063", note: "kept duration of each grid simulation"}
+    grid_burn_in_s: {value: 4, prov: placeholder, ref: "§9.1, IMP-063"}
+    grid_mixing_m: {value: 0.25, prov: placeholder, ref: "§9.1, IMP-063", note: "m used for the grid features (series draw their own m)"}
+    classify_duration_s: {value: 20, prov: placeholder, ref: "§9.1, IMP-063", note: "noise-free run for the regime label"}
+    classify_tail_s: {value: 5, prov: placeholder, ref: "§9.1, IMP-063", note: "the last seconds of the noise-free run over which the oscillation is measured"}
+    classify_perturbation_mv: {value: 0.5, prov: placeholder, ref: "§9.1, IMP-063", note: "added to y1 of the steady state so an unstable fixed point can leave it"}
+    classify_pp_threshold_mv: {value: 0.05, prov: placeholder, ref: "§9.1, IMP-063", note: "peak-to-peak of y1 - y2 over the tail above this means limit cycle, else noise-driven"}
+  features:
+    welch_segment_s: {value: 2, prov: placeholder, ref: "§9.1, §10.2, IMP-063", note: "non-overlapping Hann blocks, averaged over blocks and both channels"}
+    alpha_band_hz: {value: [8, 13], prov: placeholder, ref: "§9.1, IMP-063"}
+    total_band_hz: {value: [1, 45], prov: placeholder, ref: "§9.1, IMP-063", note: "relative alpha power = alpha-band share of this band's power"}
+    specparam_freq_range_hz: {value: [1, 40], prov: placeholder, ref: "§9.1, IMP-063", note: "fit range of the aperiodic exponent"}
+    specparam_peak_width_limits_hz: {value: [1, 8], prov: placeholder, ref: "§9.1, IMP-063"}
+    specparam_max_n_peaks: {value: 4, prov: placeholder, ref: "§9.1, IMP-063"}
+    specparam_aperiodic_mode: {value: "fixed", prov: placeholder, ref: "§9.1, IMP-063", note: "installed specparam 2.0.0rc7 (a release candidate); pin at Stage L"}
   pass:
     median_nrmse_max: {value: 0.25, prov: placeholder, ref: "§9.1, §15.1"}
     median_gain_rel_error_max: {value: 0.15, prov: placeholder, ref: "§9.1, §15.1"}

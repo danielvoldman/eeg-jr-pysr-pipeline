@@ -344,12 +344,14 @@ Note (2026-09-30, from D2): the section 9.1 planted basis (potential / SD, NOT c
 
 **GATE: DEV-005 decision.** DEV-005 is decided after the --pilot comparison (19-D vs candidates A/B on the 12 pilot subjects and synthetic series, section 17 pilot exception), before the full G0 and before the confirmatory run. Pilot-mode runs are not blocked.
 
-### [ ] E1. Operating-regime grid
+### [x] E1. Operating-regime grid
 Read: §9.1.
 Done when:
 - The 12 × 8 × 5 grid over (p, input-noise SD, observation noise) is built.
 - Matching uses scale-free features only (alpha peak, relative alpha power, specparam slope), taken from training subjects only.
 - The regime (noise-driven or limit cycle) is reported.
+
+Note (2026-09-30): done; src/synthetic_gate.py (grid, features, matching, regime label, E1 report: python -m src.synthetic_gate --grid-report --pilot), tests/test_synthetic_gate_grid.py (20 tests, 6 mutation checks), config g0.seeds / filter / filter_options / regime / features, specparam 2.0.0rc7 installed, IMP-063. Full suite 638 passed, 1 skipped (C1 writer test), 3 deselected. Findings: all 480 grid points are limit-cycle; the 15 pilot recordings all match the grid's edges (p 120 or 138, input-SD factor >= 1.10, noise share <= 0.5); axes unchanged, decision with the user. Plan additions agreed with the user: src/ukf_ext.py (E4), E5 pilot driver and DEV-005 comparison report (new step after E4).
 
 ### [ ] E2. Series generator
 Read: §9.1, §9.2.
@@ -377,6 +379,10 @@ Done when:
 - Contraction must be ≥ 50% (median).
 - Stability flags are set.
 - Null or stability failure means a hard stop. Positive-control or contraction failure sets `low_confidence`. Pilot mode never stops.
+
+### [ ] E5. Pilot driver and DEV-005 comparison report
+Read: §9.4, §17; DEV-005, IMP-063 onward.
+Done when: `python -m src.synthetic_gate --pilot` runs 20 positive, 20 Null A and 20 Null B per filter option (19D, A, B) on the same cached series, UKF-only first (gains, contraction, stability, divergence, null delta-band, NIS, runtime), then STOPS for review before any PySR stage; the PySR stage (default parsimony 0.01) and the parsimony / derivative-estimator measurements follow only on approval. One series per option is timed end to end first; an all-options estimate above about 10 h stops the run. The pilot never writes outputs/gate.json.
 
 ---
 
