@@ -487,6 +487,16 @@ g0:
     bias_from_level_index: {value: 1, prov: placeholder, ref: "§5.2, IMP-067", note: "bias and NRMSE are evaluated from the second-weakest level up (15 of the 20 series)"}
     sensitivity_subjects: {value: 20, prov: locked, ref: "§5.2"}
     sensitivity_variants: {value: 4, prov: locked, ref: "§5.2", note: "high-pass 0.5 vs 0.1 Hz, crossed with default vs strict rejection"}
+  pilot:
+    max_estimated_hours: {value: 10, prov: placeholder, ref: "PLAN E5, IMP-070", note: "the UKF-only stage for all options stops before running when the conservative estimate exceeds this"}
+    timing_series_index: {value: 2, prov: placeholder, ref: "PLAN E5, IMP-070", note: "index of the one series of each kind that is timed per option (positive: level index 2)"}
+    timing_q: {value: 1.0e-2, prov: placeholder, ref: "PLAN E5, IMP-070", note: "q of the timing runs (the tuned q is not known yet); the E2 and E3 timings used the same value"}
+    timing_warmup_s: {value: 20, prov: placeholder, ref: "PLAN E5, IMP-070", note: "length of the slice used to compile or load the Numba kernels of an option before it is timed; excluded from every timing"}
+    tuning_cache_subdir: {value: "tuning", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.cache_dir / g0.cache_subdir"}
+    comparison_file: {value: "g0_filter_comparison.json", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.pilot_results_dir"}
+    timing_file: {value: "g0_pilot_timing.json", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.pilot_results_dir"}
+    tuning_fallback: {value: "flag_off_nis", prov: placeholder, ref: "PLAN E5, IMP-070", note: "when the section 7.5 rule refuses under the standard divergence rule, q is tuned by the same NIS rule with the state-SD flag disabled in a config copy; DIAGNOSTIC ONLY, labelled in every output; any other value means no fallback"}
+    comparison_schema_version: {value: 1, prov: placeholder, ref: "PLAN E5, IMP-070"}
 
 # ---------------------------------------------------------------- split, subjects, seeds (§11, §17)
 split:

@@ -33,7 +33,13 @@ evaluate_series() runs both passes with the standard divergence rule on (a diver
 flag-off pass 1 labelled diagnostic only; positive_verdict / null_arm_verdict / contraction_verdict /
 stability_verdict / gate_flags score; build_gate_document / write_gate produce gate.json (pilot: results/pilot only).
 
-Entry points: python -m src.synthetic_gate --grid-report --pilot
+E5 (DEV-005 evidence, PLAN E5): run_pilot() generates the pilot series once, times one series of each kind per option,
+stops above g0.pilot.max_estimated_hours, then runs the UKF-only stage for every option on the same series (tuned q, both
+passes, rule ON plus the flag-off diagnostic), writes results/pilot/gate_<option>.json and g0_filter_comparison.json and
+prints one table per option. No PySR, never outputs/gate.json, no DEV-005 decision.
+
+Entry points: python -m src.synthetic_gate --pilot [--estimate-only]       (E5)
+              python -m src.synthetic_gate --grid-report --pilot
               python -m src.synthetic_gate --time-series --pilot
               python -m src.synthetic_gate --time-gate-series --pilot
 """
@@ -1373,6 +1379,427 @@ def write_gate(cfg, root, doc, path):
     return path
 
 
+# ---------------------------------------------------------------- E5: pilot driver (UKF-only DEV-005 evidence)
+
+class PilotStop(GateError):
+    """The pilot refuses to continue (runtime estimate above the limit); the message says why."""
+
+
+KIND_SETS = ("positive", "null_A", "null_B", "gate_positive", "gate_null")      # the evaluated series sets
+KIND_COUNT_KEYS = {"positive": "n_pilot_positive", "null_A": "n_pilot_null_A", "null_B": "n_pilot_null_B",
+                   "gate_positive": "n_preprocessing_gate_positive", "gate_null": "n_preprocessing_gate_null"}
+
+
+def series_digest(series):
+    """SHA-256 of the data a filter sees (segments and starts): the same digest for every option proves the options
+    ran on the same cached series (paired comparison)."""
+    h = hashlib.sha256()
+    for seg in series.segments:
+        h.update(np.ascontiguousarray(seg, dtype=np.float64).tobytes())
+    h.update(np.asarray(series.starts, dtype=np.int64).tobytes())
+    return h.hexdigest()
+
+
+def pilot_inputs(cfg, root):
+    """Feature table (pilot subjects, training side) and regime grid, as in the E1 report."""
+    root = Path(root)
+    split = load_split(cfg, root)
+    pilot_ids = pp.load_pilot_ids(cfg, root)
+    table = build_feature_table(cfg, sorted(pilot_ids), split, make_recording_loader(cfg, root, pilot_ids))
+    grid = build_grid(cfg, table.exponent, root / cfg["paths"]["cache_dir"] / cfg["g0"]["cache_subdir"],
+                      cfg["compute"]["joblib_n_jobs"])
+    return table, grid
+
+
+def pilot_series_sets(cfg, grid, table):
+    """Every series of the pilot, generated ONCE and shared by all filter options: the 20 positive, 20 Null A and 20
+    Null B series (stream 'pilot'), the 20-series tuning set (stream 'tuning') and the preprocessing-gate set (20
+    positive and 20 artifact-only null series with the section 5.2 artifacts)."""
+    gc, g0 = g0_cfg(cfg), cfg["g0"]
+    sets = {"positive": [generate_series(gc, "positive", i, grid, table, "pilot") for i in range(g0["n_pilot_positive"])],
+            "null_A": [generate_series(gc, "null_A", i, grid, table, "pilot") for i in range(g0["n_pilot_null_A"])],
+            "null_B": [generate_series(gc, "null_B", i, grid, table, "pilot") for i in range(g0["n_pilot_null_B"])],
+            "tuning": tuning_set(gc, grid, table)}
+    sets["gate_positive"], sets["gate_null"] = preprocessing_gate_set(gc, grid, table)
+    return sets
+
+
+def _series_worker(payload):
+    """Top-level (Windows spawn): one series through one filter option, both passes, rule ON plus the flag-off
+    diagnostic; adds the busy time and the digest of the data it received."""
+    import time
+    from threadpoolctl import threadpool_limits
+    cfg, series, filter_name, q = payload
+    with threadpool_limits(limits=1):
+        t = time.perf_counter()
+        rec, _ = evaluate_series(cfg, series, filter_name, q, want_pass2=True, diagnostic=True)
+        rec["runtime_s"] = time.perf_counter() - t
+    rec["data_sha256"] = series_digest(series)
+    return rec
+
+
+def time_series_passes(cfg, series, filter_name, q):
+    """Wall time of the stages evaluate_series runs on one series: pass 1 with the standard rule ON, pass 2 (only when the
+    rule leaves the recording alive), the flag-off diagnostic pass 1. When pass 2 is skipped because the series diverged,
+    pass 2 is timed on the flag-off parameters as a conservative bound."""
+    import time
+    from src import passes
+    gc = g0_cfg(cfg)
+    off = copy.deepcopy(gc)
+    off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
+    out = {"p2_on_s": None, "p2_bound_s": None}
+    with filter_context(gc, filter_name, series.segments):
+        t = time.perf_counter()
+        p1 = passes.run_pass1(series.segments, series.starts, gc, q)
+        out["p1_on_s"] = time.perf_counter() - t
+        out["diverged_pass1"] = bool(p1.recording_diverged)
+        if p1.params is not None and not p1.recording_diverged:
+            skip = {s.index for s in p1.segments if s.diverged}
+            t = time.perf_counter()
+            passes.run_pass2(series.segments, series.starts, p1.params, gc, q, skip_segments=skip)
+            out["p2_on_s"] = time.perf_counter() - t
+    with filter_context(off, filter_name, series.segments):
+        t = time.perf_counter()
+        d1 = passes.run_pass1(series.segments, series.starts, off, q)
+        out["p1_off_s"] = time.perf_counter() - t
+        if out["p2_on_s"] is None and d1.params is not None:
+            t = time.perf_counter()
+            passes.run_pass2(series.segments, series.starts, d1.params, off, q)
+            out["p2_bound_s"] = time.perf_counter() - t
+    out["expected_s"] = out["p1_on_s"] + (out["p2_on_s"] or 0.0) + out["p1_off_s"]
+    out["bound_s"] = out["p1_on_s"] + out["p1_off_s"] + (out["p2_on_s"] if out["p2_on_s"] is not None else (out["p2_bound_s"] or 0.0))
+    return out
+
+
+def time_option(cfg, filter_name, sets):
+    """End-to-end timing of ONE series of each kind for one filter option (both passes; the tuning series through the
+    forward-only run of one grid value). The kernels of the option are compiled or loaded on a short slice first and that
+    time is excluded."""
+    import dataclasses
+    import time
+    pc = cfg["g0"]["pilot"]
+    q, i = pc["timing_q"], pc["timing_series_index"]
+    gc = g0_cfg(cfg)
+    first = sets["positive"][0]
+    n_warm = int(round(pc["timing_warmup_s"] * cfg["preprocessing"]["observation_fs_hz"]))
+    short = dataclasses.replace(first, segments=[first.segments[0][:, :n_warm]], starts=[first.starts[0]], truth=None)
+    evaluate_series(cfg, short, filter_name, q, want_pass2=True, diagnostic=False)
+    out = {kind: time_series_passes(cfg, sets[kind][i], filter_name, q) for kind in KIND_SETS}
+    tune = sets["tuning"][i]
+    t = time.perf_counter()
+    _tune_worker((tune.segments, tune.starts, gc, q, filter_name))
+    out["tuning"] = {"forward_one_q_s": time.perf_counter() - t}
+    return out
+
+
+def estimate_runtime(cfg, timings, generation_s, n_workers):
+    """Estimate of the UKF-only stage from the one-series timings: per option the sum over every kind of n_series x time
+    plus the tuning set at every grid value, divided by the number of workers (perfect scaling assumed), plus the shared
+    series generation. 'expected' follows the code path of the series timed; 'bound' times pass 2 even where the standard
+    rule skipped it. Returns hours."""
+    n_q = int(cfg["ukf"]["process_noise"]["q_grid_n"])
+    per_option = {}
+    for name, tm in timings.items():
+        exp = sum(cfg["g0"][KIND_COUNT_KEYS[k]] * tm[k]["expected_s"] for k in KIND_SETS)
+        bnd = sum(cfg["g0"][KIND_COUNT_KEYS[k]] * tm[k]["bound_s"] for k in KIND_SETS)
+        tune = cfg["g0"]["n_tuning_series"] * n_q * tm["tuning"]["forward_one_q_s"]
+        per_option[name] = {"expected_h": (exp + tune) / n_workers / 3600.0, "bound_h": (bnd + tune) / n_workers / 3600.0,
+                            "tuning_h": tune / n_workers / 3600.0}
+    gen_h = generation_s / 3600.0
+    return {"per_option": per_option, "generation_h": gen_h, "n_workers": n_workers,
+            "expected_h": gen_h + sum(v["expected_h"] for v in per_option.values()),
+            "bound_h": gen_h + sum(v["bound_h"] for v in per_option.values())}
+
+
+def _flag_off_record(r):
+    """The same record read through its flag-off diagnostic estimates (DIAGNOSTIC ONLY): a missing estimate counts as
+    diverged."""
+    est = (r.get("diagnostic_flag_off") or {}).get("estimates")
+    return {**r, "diverged": est is None, "estimates": est}
+
+
+def _median_contraction(cfg, records, names):
+    """Median over the series (and over the names, pooled) of 1 - posterior SD / prior SD; a diverged series contributes 0."""
+    prior = prior_sds(cfg)
+    vals = []
+    for r in records:
+        est = None if r["diverged"] else r["estimates"]
+        for name in names:
+            sd = None if est is None else est["posterior_sd"].get(name)
+            vals.append(0.0 if sd is None else 1.0 - sd / prior[name])
+    return float(np.median(vals))
+
+
+def _null_counts(cfg, records, flag_off=False):
+    """Null arm against delta: series with an estimate where either filtered |g| is at or above delta ('out'), series
+    without an estimate ('dropped': the standard rule, or no parameters for the flag-off diagnostic), and the median of
+    the larger filtered |g| over the series that have one."""
+    d = delta(cfg)
+    out = drop = 0
+    mags = []
+    for r in records:
+        est = (r.get("diagnostic_flag_off") or {}).get("estimates") if flag_off else (None if r["diverged"] else r["estimates"])
+        if est is None or "g12_filt" not in est:
+            drop += 1
+            continue
+        mags.append(max(abs(est["g12_filt"]), abs(est["g21_filt"])))
+        out += mags[-1] >= d
+    return {"n": len(records), "n_out": int(out), "n_dropped": int(drop), "n_inside": int(len(records) - out - drop),
+            "median_max_abs_g": float(np.median(mags)) if mags else None}
+
+
+def _z_summary(records):
+    zs = [r["z_distance"] for r in records]
+    return {"median": float(np.median(zs)), "max": float(np.max(zs))}
+
+
+def option_summary(cfg, filter_name, qr, recs, runtime, std_refusal=None):
+    """The compact per option x level comparison of one filter option from its records (recs maps a set name to the
+    records of that set). qr is the tuning.QRResult of the option; runtime a dict of wall seconds."""
+    pos = recs["positive"]
+    pv = positive_verdict(cfg, pos)
+    off_pv = positive_verdict(cfg, [_flag_off_record(r) for r in pos])
+    gp = gain_profile(cfg, pos)
+    levels = {}
+    for lv, v in pv["levels"].items():
+        rs = [r for r in pos if r["level_index"] == lv]
+        levels[str(lv)] = {"g_true": rs[0]["g_true"], "n": v["n"], "n_dropped_by_standard_rule": v["n_diverged"],
+                           "gain_error_median_smoothed": v["gain_error_median"],
+                           "gain_error_median_filtered": v["gain_error_median_filtered"],
+                           "diagnostic_flag_off_gain_error_median_smoothed": off_pv["levels"][lv]["gain_error_median"],
+                           "diagnostic_flag_off_gain_error_median_filtered": off_pv["levels"][lv]["gain_error_median_filtered"],
+                           "contraction_g_median": _median_contraction(cfg, rs, ("g12", "g21")),
+                           "contraction_m_median": _median_contraction(cfg, rs, ("m",)),
+                           "posterior_sd_g_median": gp[lv]["posterior_sd_median"],
+                           "z_distance": _z_summary(rs), "detection_floor": v["detection_floor"]}
+    nulls = {}
+    for name in ("null_A", "null_B", "gate_null"):
+        rs = recs[name]
+        c = _null_counts(cfg, rs)
+        nulls[name] = {**c, "diagnostic_flag_off": {"diagnostic_only": True, **_null_counts(cfg, rs, True)},
+                       "upper_bound_95_of_failures": upper_bound_95(c["n_out"] + c["n_dropped"], len(rs)),
+                       "z_distance": _z_summary(rs)}
+    allrecs = [r for name in KIND_SETS for r in recs[name]]
+    out = {"filter": filter_name, "levels": levels, "nulls": nulls, "stability_all_runs": stability_verdict(allrecs),
+           "n_dropped_by_standard_rule": {name: int(sum(r["diverged"] for r in recs[name])) for name in KIND_SETS},
+           "runtime": runtime}
+    if qr is not None:
+        row = qr.table[qr.q_index] if qr.q is not None else None
+        out["tuning"] = {"q": qr.q, "refused": bool(qr.refused), "refusal_reason": qr.refusal_reason,
+                         "mean_nis_at_q": None if row is None else row["mean_nis"], "nis_target": qr.target, "nis_band": qr.band,
+                         "in_band": bool(qr.in_band), "at_grid_edge": bool(qr.at_grid_edge), "nis_spread": qr.nis_spread,
+                         "n_recordings": qr.n_recordings, "n_matched": qr.n_matched, "table": qr.table,
+                         "diagnostic_flag_off_tuning": std_refusal is not None, "standard_rule_refusal": std_refusal}
+    return out
+
+
+def option_verdicts(cfg, recs):
+    """The G0 verdicts of one option from its records (True / False / None = pending on PySR), as gate.json carries them."""
+    gp_records = []
+    for r in recs["gate_positive"]:
+        est = None if r["diverged"] else r["estimates"]
+        gp_records.append({"level_index": r["level_index"], "g_true": r["g_true"],
+                           **{k: (None if est is None else est[k]) for k in ("g12", "g21", "rho1", "rho2")}})
+    return {"positive": positive_verdict(cfg, recs["positive"])["pass"],
+            "null_A": null_arm_verdict(cfg, recs["null_A"])["pass"],
+            "null_B": null_arm_verdict(cfg, recs["null_B"])["pass"],
+            "contraction": contraction_verdict(cfg, recs["positive"])["pass"],
+            "stability": stability_verdict(recs["positive"])["pass"],
+            "preproc_null": null_arm_verdict(cfg, recs["gate_null"])["pass"],
+            "preproc_bias": preprocessing_bias_verdict(cfg, gp_records)["pass"]}
+
+
+def check_pairing(records_by_option):
+    """The options must have run on the same series: the data digest of every (set, index) is identical across options."""
+    ref = None
+    for name, recs in records_by_option.items():
+        d = {f"{s}:{r['index']}": r["data_sha256"] for s in KIND_SETS for r in recs[s]}
+        if ref is None:
+            ref = d
+        elif d != ref:
+            raise GateError(f"option {name} did not run on the same series as the first option")
+    if not ref:
+        return None
+    return {"paired": True, "n_series": len(ref), "n_options": len(records_by_option),
+            "digest_of_digests": hashlib.sha256("".join(f"{k}={v}" for k, v in sorted(ref.items())).encode("utf-8")).hexdigest()}
+
+
+def _pct(v):
+    return "inf" if v is None or not np.isfinite(v) else f"{100.0 * v:.0f}%"
+
+
+def format_comparison(report):
+    """Printable text of the comparison: one compact table per option (rows = coupling levels and the null arms)."""
+    lines = []
+    for name, o in report["options"].items():
+        t = o.get("tuning")
+        if t is None or t["q"] is None:
+            lines.append(f"== option {name}: q refused, no evaluation ({t['refusal_reason'] if t else None}) ==")
+            continue
+        lines.append(f"== option {name}: q {t['q']:.3g}, mean NIS {t['mean_nis_at_q']:.2f} (target {t['nis_target']:g} +- "
+                     f"{t['nis_band']:g}), in_band {t['in_band']}, at_grid_edge {t['at_grid_edge']} ==")
+        sr = t.get("standard_rule_refusal")
+        if sr:
+            lines.append(f"   q is DIAGNOSTIC (tuned with the state-SD flag disabled): the section 7.5 rule refused under the standard rule "
+                         f"({sr['reason']}); series diverged per q {[d['n_diverged'] for d in sr['n_diverged_per_q']]} of {sr['n_recordings']}")
+        s = o["stability_all_runs"]
+        mn = "none" if s["min_eig_overall"] is None else f"{s['min_eig_overall']:.2e}"
+        lines.append(f"   stability, all {s['n_runs']} UKF runs: negative-eig steps {s['n_negative_eig_steps']}, NaN/Inf {s['n_nan_inf']}, "
+                     f"linalg divergences {s['n_linalg_divergences']}, jitter fallbacks {s['n_jitter_fallbacks']}, min eig {mn}")
+        lines.append(f"   dropped by the standard rule: {o['n_dropped_by_standard_rule']}")
+        rt = o["runtime"]
+        lines.append(f"   runtime: tuning {rt['tuning_s'] / 60:.1f} min, series {rt['evaluation_s'] / 60:.1f} min wall "
+                     f"({rt['series_busy_s'] / 60:.1f} min busy, {rt['n_series']} series)")
+        lines.append("   positive control. err = median |est - true| / true over g12 and g21 (sm = recording-level smoothed, flt = filtered); "
+                     "c(g), c(m) = median 1 - SD / prior SD; off = state-SD flag disabled, DIAGNOSTIC ONLY")
+        lines.append(f"   {'level':<7}{'g':>6}{'n':>4}{'drop':>5}{'err sm':>8}{'err flt':>8}{'off sm':>8}{'off flt':>8}"
+                     f"{'c(g)':>7}{'c(m)':>7}{'z med/max':>12}")
+        for lv, v in o["levels"].items():
+            lab = f"L{int(lv) + 1}" + ("*" if v["detection_floor"] else "")
+            lines.append(f"   {lab:<7}{v['g_true']:6.1f}{v['n']:4d}{v['n_dropped_by_standard_rule']:5d}"
+                         f"{_pct(v['gain_error_median_smoothed']):>8}{_pct(v['gain_error_median_filtered']):>8}"
+                         f"{_pct(v['diagnostic_flag_off_gain_error_median_smoothed']):>8}"
+                         f"{_pct(v['diagnostic_flag_off_gain_error_median_filtered']):>8}"
+                         f"{v['contraction_g_median']:7.2f}{v['contraction_m_median']:7.2f}"
+                         f"{v['z_distance']['median']:7.2f}/{v['z_distance']['max']:.2f}")
+        lines.append(f"   nulls against delta = {report['delta']:.2f}: out = a filtered |g| >= delta, drop = no estimate (standard rule), "
+                     f"in = both inside; * = weakest level (detection floor, not required)")
+        lines.append(f"   {'arm':<10}{'out':>7}{'drop':>6}{'in':>5}{'med max|g|':>12}{'off out':>9}{'off drop':>9}{'z med/max':>12}")
+        for arm, v in o["nulls"].items():
+            off = v["diagnostic_flag_off"]
+            med = "-" if v["median_max_abs_g"] is None else f"{v['median_max_abs_g']:.2f}"
+            lines.append(f"   {arm:<10}{str(v['n_out']) + '/' + str(v['n']):>7}{v['n_dropped']:>6}{v['n_inside']:>5}{med:>12}"
+                         f"{str(off['n_out']) + '/' + str(off['n']):>9}{off['n_dropped']:>9}"
+                         f"{v['z_distance']['median']:7.2f}/{v['z_distance']['max']:.2f}")
+    return lines
+
+
+def comparison_paths(cfg, root):
+    d = Path(root) / cfg["paths"]["pilot_results_dir"]
+    return d / cfg["g0"]["pilot"]["comparison_file"], d / cfg["g0"]["pilot"]["timing_file"]
+
+
+def write_pilot_json(cfg, root, doc, path):
+    """Atomic JSON write under results/pilot only (so never outputs/gate.json, CLAUDE.md rule 6)."""
+    path, pilot_dir = Path(path), Path(root) / cfg["paths"]["pilot_results_dir"]
+    if pilot_dir.resolve() not in path.resolve().parents:
+        raise GateError(f"pilot files are written under {pilot_dir} only")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(_jsonable(doc), indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+    tmp.replace(path)
+    return path
+
+
+def pool_size(cfg, n_jobs=None):
+    """Worker count: the requested one or compute.joblib_n_jobs, never above the affinity mask (CLAUDE.md)."""
+    import psutil
+    n = cfg["compute"]["joblib_n_jobs"] if n_jobs is None else n_jobs
+    return max(1, min(int(n), len(psutil.Process().cpu_affinity())))
+
+
+def run_pilot(cfg, root, n_jobs=None, estimate_only=False):
+    """E5: the UKF-only stage of the DEV-005 comparison on the pilot set (no PySR, never outputs/gate.json). Order:
+    generate every series once, time one series of each kind per option, stop when the conservative all-options estimate
+    exceeds g0.pilot.max_estimated_hours, then per option tune G0's own q on the tuning set and evaluate the 100 series
+    (20 positive, 20 Null A, 20 Null B, 20 gate positive, 20 gate artifact-only null) on n_jobs workers. Writes
+    results/pilot/gate_<option>.json per option and the comparison file; returns the report."""
+    import time
+    from joblib import Parallel, delayed
+    from src import tuning
+    root = Path(root)
+    options = gate_filters(cfg, True)
+    n_workers = pool_size(cfg, n_jobs)
+    limit_h = cfg["g0"]["pilot"]["max_estimated_hours"]
+    comparison_path, timing_path = comparison_paths(cfg, root)
+    t0 = time.perf_counter()
+    table, grid = pilot_inputs(cfg, root)
+    sets = pilot_series_sets(cfg, grid, table)
+    generation_s = time.perf_counter() - t0
+    emit(f"== E5: {sum(len(v) for v in sets.values())} series generated once in {generation_s / 60:.1f} min; options {options}; "
+         f"{n_workers} workers ==")
+    timings = {name: time_option(cfg, name, sets) for name in options}
+    est = estimate_runtime(cfg, timings, generation_s, n_workers)
+    write_pilot_json(cfg, root, {"timing_per_option": timings, "estimate": est, "limit_h": limit_h}, timing_path)
+    for name, tm in timings.items():
+        parts = []
+        for k in KIND_SETS:
+            p2 = tm[k]["p2_on_s"]
+            parts.append(f"{k} p1 {tm[k]['p1_on_s']:.1f}s p2 {'skipped (bound ' + format(tm[k]['p2_bound_s'] or 0.0, '.1f') + 's)' if p2 is None else format(p2, '.1f') + 's'} "
+                         f"off {tm[k]['p1_off_s']:.1f}s")
+        emit(f"timing {name}: " + "; ".join(parts) + f"; tuning one q {tm['tuning']['forward_one_q_s']:.1f}s")
+    emit(f"estimate, all options, {n_workers} workers: expected {est['expected_h']:.2f} h, conservative bound {est['bound_h']:.2f} h "
+         f"(limit {limit_h} h); per option expected/bound: " + ", ".join(
+             f"{k} {v['expected_h']:.2f}/{v['bound_h']:.2f} h" for k, v in est["per_option"].items()))
+    if est["bound_h"] > limit_h:
+        raise PilotStop(f"conservative estimate {est['bound_h']:.1f} h exceeds the {limit_h} h limit: stopping before the UKF-only stage")
+    if estimate_only:
+        return {"estimate": est}
+    cache_dir = root / cfg["paths"]["cache_dir"] / cfg["g0"]["cache_subdir"] / cfg["g0"]["pilot"]["tuning_cache_subdir"]
+    records_by_option, summaries, gate_docs = {}, {}, {}
+    for name in options:
+        t = time.perf_counter()
+        qr = tune_g0_q(cfg, sets["tuning"], name, cache_dir=cache_dir, n_jobs=n_workers)
+        emit(f"option {name}: tuned q {qr.q} (refused {qr.refused}) in {(time.perf_counter() - t) / 60:.1f} min")
+        std_refusal = None
+        if qr.q is None:                      # the section 7.5 rule refuses under the standard divergence rule
+            std_refusal = {"reason": qr.refusal_reason, "n_matched": qr.n_matched, "n_recordings": qr.n_recordings,
+                           "n_diverged_per_q": [{"q": r["q"], "n_diverged": r["n_diverged"]} for r in qr.table]}
+            emit(f"option {name}: section 7.5 rule refused under the standard rule ({qr.refusal_reason}); n diverged per q "
+                 f"{[r['n_diverged'] for r in qr.table]}")
+            if cfg["g0"]["pilot"]["tuning_fallback"] == "flag_off_nis":
+                off = copy.deepcopy(cfg)
+                off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
+                qr = tune_g0_q(off, sets["tuning"], name, cache_dir=cache_dir, n_jobs=n_workers)
+                emit(f"option {name}: DIAGNOSTIC tuning with the state-SD flag disabled: q {qr.q} (refused {qr.refused})")
+        tune_s = time.perf_counter() - t
+        if qr.q is None:
+            summaries[name] = {"filter": name, "tuning": {"q": None, "refused": True, "refusal_reason": qr.refusal_reason,
+                                                          "standard_rule": std_refusal}}
+            continue
+        jobs = [(s, ser) for s in KIND_SETS for ser in sets[s]]
+        t = time.perf_counter()
+        results = Parallel(n_jobs=n_workers, backend=cfg["compute"]["joblib_backend"])(
+            delayed(_series_worker)((cfg, ser, name, float(qr.q))) for _, ser in jobs)
+        eval_s = time.perf_counter() - t
+        recs = {s: [] for s in KIND_SETS}
+        for (s, _), r in zip(jobs, results):
+            r["set"] = s
+            recs[s].append(r)
+        records_by_option[name] = recs
+        runtime = {"tuning_s": tune_s, "evaluation_s": eval_s, "series_busy_s": float(sum(r["runtime_s"] for r in results)),
+                   "n_series": len(results)}
+        summaries[name] = option_summary(cfg, name, qr, recs, runtime, std_refusal)
+        sections = {"positive": positive_verdict(cfg, recs["positive"]), "null_A": null_arm_verdict(cfg, recs["null_A"]),
+                    "null_B": null_arm_verdict(cfg, recs["null_B"]), "contraction": contraction_verdict(cfg, recs["positive"]),
+                    "stability": stability_verdict(recs["positive"]), "gain_profile": gain_profile(cfg, recs["positive"]),
+                    "regime": {s: {str(k): int(v) for k, v in zip(*np.unique([r["regime"] for r in recs[s]], return_counts=True))}
+                               for s in KIND_SETS},
+                    "report": option_report(cfg, name, {s: recs[s] for s in KIND_SETS}),
+                    "preprocessing": {"null": null_arm_verdict(cfg, recs["gate_null"]),
+                                      "note": "UKF part only; the PySR NRMSE is pending"}}
+        doc = build_gate_document(cfg, root, pilot=True, filter_name=name, verdicts=option_verdicts(cfg, recs), sections=sections,
+                                  q={"q": qr.q, "in_band": qr.in_band, "at_grid_edge": qr.at_grid_edge,
+                                     "diagnostic_flag_off_tuning": std_refusal is not None, "standard_rule_refusal": std_refusal})
+        gate_docs[name] = str(write_gate(cfg, root, doc, gate_path(cfg, root, True, name)))
+        emit(f"option {name}: {len(results)} series in {eval_s / 60:.1f} min wall")
+    pairing = check_pairing(records_by_option)
+    head, dirty = tuning._git_state(root)
+    report = {"schema_version": cfg["g0"]["pilot"]["comparison_schema_version"], "pilot": True, "stage": "UKF-only (no PySR)",
+              "dev005_decision": "not decided; evidence only", "delta": delta(cfg), "n_workers": n_workers,
+              "options": summaries, "pairing": pairing, "timing": {"per_option": timings, "estimate": est},
+              "gate_documents": gate_docs, "seeds": dict(cfg["g0"]["seeds"]),
+              "provenance": {"git_commit": head, "git_dirty": dirty,
+                             "config_sha256": hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+                             "code_sha256": hashlib.sha256(_SOURCE.read_bytes()).hexdigest()}}
+    write_pilot_json(cfg, root, report, comparison_path)
+    for line in format_comparison(report):
+        emit(line)
+    emit(f"pairing: {pairing}")
+    emit(f"written: {comparison_path}")
+    return report
+
+
 # ---------------------------------------------------------------- the E1 report
 
 def grid_report(cfg, root, pilot, n_jobs=None):
@@ -1434,6 +1861,7 @@ def main(argv=None):
     ap.add_argument("--time-series", action="store_true")
     ap.add_argument("--time-gate-series", action="store_true")
     ap.add_argument("--pilot", action="store_true")
+    ap.add_argument("--estimate-only", action="store_true", help="E5: time one series per option, print the estimate, stop")
     ap.add_argument("--n-jobs", type=int, default=None)
     args = ap.parse_args(argv)
     cfg = load_config()
@@ -1450,6 +1878,13 @@ def main(argv=None):
         if not args.pilot:
             raise GateError("the timing run is wired for --pilot only")
         time_gate_series(cfg, REPO_ROOT)
+        return 0
+    if args.pilot:
+        try:
+            run_pilot(cfg, REPO_ROOT, args.n_jobs, args.estimate_only)
+        except PilotStop as e:
+            emit(f"STOP: {e}")
+            return 3
         return 0
     ap.error("nothing to do")
 
