@@ -15,9 +15,10 @@ from src import state_space as ss
 from src import ukf, ukf_ext
 from src.config import load_config
 from tests import sim_data
-from tests.legacy_rule import legacy
+from tests.legacy_rule import legacy, new_rule
 
-CFG = load_config()
+SHIPPED = load_config()
+CFG = new_rule(SHIPPED)                  # the dormant DEV-007 rule as tested in IMP-091; the shipped config is legacy (IMP-093)
 Q = 1.0e-2
 FS = CFG["preprocessing"]["observation_fs_hz"]
 N_EXEMPT = int(round(CFG["ukf"]["divergence"]["startup_exempt_s"] * FS))
@@ -81,6 +82,8 @@ def first_run_end(beyond, n):
 # ---- configuration ----------------------------------------------------------------------------------------
 
 def test_config_values_and_settings(layout):
+    dv = SHIPPED["ukf"]["divergence"]                                        # IMP-093: the shipped config is the legacy rule
+    assert (dv["state_sd_multiple"], dv["state_dwell_s"], dv["parameter_sd_multiple"]) == (10, 0, None)
     dv = CFG["ukf"]["divergence"]
     assert (dv["state_sd_multiple"], dv["state_dwell_s"], dv["parameter_sd_multiple"], dv["parameter_dwell_s"]) == (10, 0.5, 8, 0.5)
     n_dwell, n_pdwell, pcols, pmean, plim = ukf.dwell_settings(layout, CFG)
@@ -346,3 +349,39 @@ def test_free_run_counter_resets_on_a_sample_inside_the_bound(monkeypatch):
     monkeypatch.setattr(fr, "propagate", prop)
     out = fr.simulate(start_state(spec0), 4 * N_DWELL, np.random.default_rng(1), CFG, LAYOUT, spec0, QF, n_real=3)
     assert not out["unstable"].any() and np.isfinite(out["y"]).all()
+
+
+# ---- IMP-093: the shipped (default) config IS the legacy first-crossing rule, bit for bit -------------------------
+
+@pytest.mark.parametrize("backend", ["numpy", "numba"])
+def test_default_config_stops_at_the_first_crossing_found_by_an_independent_replay(layout, backend):
+    z = data()
+    z[300:310] += 20.0                                           # a brief crossing the dormant dwell rule would survive
+    ref = reference_run(z, layout)
+    expected = int(np.argmax(state_beyond(ref, layout)))         # replayed first sample beyond 10 SD after the exemption
+    assert 300 <= expected < 320
+    res = ukf.run_filter(z, SHIPPED, layout, Q, backend=backend)
+    assert res.diverged and res.divergence_reason == "state_beyond_sd_multiple" and res.divergence_step == expected
+    assert res.n_done == expected
+    # a sustained offset: the old rule stops at the first crossing, never by the parameter clause
+    z2 = data() + 100.0
+    ref2 = reference_run(z2, layout)
+    exp2 = int(np.argmax(state_beyond(ref2, layout)))
+    res2 = ukf.run_filter(z2, SHIPPED, layout, Q, backend=backend)
+    assert res2.diverged and res2.divergence_reason == "state_beyond_sd_multiple" and res2.divergence_step == exp2
+
+
+@pytest.mark.parametrize("backend", ["numpy", "numba"])
+def test_default_config_equals_explicit_legacy_and_the_flag_off_run_bit_for_bit(layout, backend):
+    z = data()
+    a = ukf.run_filter(z, SHIPPED, layout, Q, backend=backend)
+    b = ukf.run_filter(z, legacy(SHIPPED), layout, Q, backend=backend)
+    c = ukf.run_filter(z, flag_off(SHIPPED), layout, Q, backend=backend)
+    assert not a.diverged
+    for name in ("x", "nis", "z_pred", "S", "innovation", "min_eig"):
+        assert np.array_equal(getattr(a, name), getattr(b, name)) and np.array_equal(getattr(a, name), getattr(c, name)), name
+
+
+def test_default_settings_are_dwell_one_and_no_parameter_clause(layout):
+    n_dwell, _, pcols, _, plim = ukf.dwell_settings(layout, SHIPPED)
+    assert n_dwell == 1 and np.all(np.isinf(plim))
