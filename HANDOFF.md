@@ -1,4 +1,4 @@
-# HANDOFF.md (2026-10-01, written from memory at the end of a very long chat; verify against git and the tests)
+# HANDOFF.md (2026-10-02, updated after G8 and H0; verify against git and the tests)
 
 Source of truth for the science: PREREGISTRATION.md (planning doc v0.6, tag prereg-v0.6). Standing rules: CLAUDE.md. Build order: PLAN.md. Every deviation (DEV-xxx) and implementation clarification (IMP-xxx): DEVIATIONS.md. Old entries are never edited except their Commit column; corrections go in new entries.
 
@@ -14,9 +14,13 @@ Coupled two-node Jansen-Rit model fit to two bipolar resting-state EEG channels 
 - Do not re-litigate: Wilson-Cowan, single-channel E/I split, open-form PySR, UDE, 4-phase layout, section 16.5.3 not-adopted list, Jansen-Rit choice.
 
 ## State (verify: git log --oneline -15; git status; pytest -rs -q)
-HEAD = 45d8ce4 (G7) on top of ee15c81 (G5), 3f0e186 (G3) and 44eff10 (IMP-083/084 docs). Full suite: 1027 passed, 1 skipped (tests/test_state_space.py:476, the write_initial_covariance writer test: neural_variance is already written; it is NOT a C1 scoring writer), 3 deselected (pysr marker; pytest.ini excludes them; run `pytest -m pysr` before releases). The full suite now takes about 14 min.
+HEAD = 5a63ef2 (H0) on top of 7b197f6 (G8), b01c7ad (docs), 45d8ce4 (G7), ee15c81 (G5), 3f0e186 (G3). Full suite: 1099 passed, 1 skipped (tests/test_state_space.py:476, the write_initial_covariance writer test: neural_variance is already written; it is NOT a C1 scoring writer), 3 deselected (pysr marker; pytest.ini excludes them; run `pytest -m pysr` before releases). The full suite takes about 14 min. (Before G8 the count was 1027; G8 added 26 tests, H0 46.)
 Recent commits (newest first): 45d8ce4 G7 (section 5.2 sensitivity; IMP-087); ee15c81 G5 (C4 free-run, src/freerun.py; IMP-084, IMP-086); 3f0e186 G3 (C2 aggregation, parallel run_c1; IMP-085); 44eff10 docs IMP-083 (pilot divergence census) and IMP-084 (Holm family rule); d326f39, 3eb7106, c151f4c docs; a4b5b90 G2/G4/G6 (Holm family, C3 ICC, wPLI, AAFT; IMP-080 to IMP-082); 85290c9, a318ae7 IMP-079 docs; fa2c0d9 G1 (C1 scoring); 824c8aa F1; dc48b4f F0; 2f61362 golden numbers; c25886b; c24c937 DEV-005 adopted; E1-E8 and stages A-D earlier.
 Done: Stages 0, A, B, C (closed), D (D1 machinery, D2 PySR 2.6.0 / SymbolicRegression.jl 2.5.1 / Julia 1.11.9 under .venv, turbo stays false), E1-E4 and E5 UKF-only stage, E6-E8 diagnostics, F0 (dc48b4f) and F1 (824c8aa): Stage F closed. G0.5 (c3682ba: M3 residual hook, src/ukf_resid.py NumPy filter, frozen-equation writer/loader, IMP-077) and G1 (C1 scoring, bootstrap, holm(p, m), guard, src/robustness.py, IMP-078) done on pilot subjects only; G2 partly (Holm family and adjusted values open). results/pilot/c1_42.json exists (mechanics only, M3 absent: no frozen equation yet). G2 stage (a4b5b90), on pilot subjects only: Holm family = 11 members (IMP-080: 2 C1 steps + 3 free-run windows + 2 test-partition ICC directions + 4 non-primary seeds; statistics.holm_family_size = 11; no adjusted value until all 11 raw p exist, the adjustment runs once in G8); G4 (C3 ICC) marked [~]: machinery built (ICC(3,1) per direction, F-based and cluster-bootstrap CIs, vigilance-adjusted ICC, pair rules, pilot-only guard) but no frozen equation exists, so the pilot file uses the M2 stand-in and makes no verdict (IMP-081); G6 done on pilot data (wPLI, imaginary coherency, AAFT; aaft.seed = 42, placeholder; IMP-082). Pilot outputs: results/pilot/c3_42.json, results/pilot/diagnostics_42.json (mechanics only). G2 (Holm) box stays open in PLAN.
+
+G8 and H0 (2026-10-02; IMP-088, IMP-089):
+- G8 (7b197f6): robustness.run_summary writes summary.json and equations.tex (pilot: results/pilot/); the Holm adjustment runs there (11 members, or 8 when the c4 file's status is not 'attempted'; a pilot never gets an adjusted value); G2 is ticked [x]. Absent inputs are written as absent with a None verdict.
+- H0 (5a63ef2): main.py phases 1 to 4 are real runners (steps with output files, JSON flags, gate and low_confidence carry-forward, resumability with provenance, --force, per-variant exclusion files, the 5% halt, impulse responses, allow_all only inside preprocess.all_subjects_permitted()). `--phase 1 --pilot` ran for real (0 of 16 units-check failures; flag low_confidence true; the g0_pilot step was skipped because gate_A.json exists). `--phase 2 --pilot` runs the Q/R report and stops at the NOT BUILT primary fit (real-data PySR driver and frozen-equation write); the full G0 driver (Stage K) and figures.py (H1) are also not built. The pilot G0 now runs filter A only and writes comparison/timing files with an `_A` suffix.
 
 G3, G5, G7 (2026-10-02, pilot subjects only, machinery done, real content waits for a frozen equation or the gate; PLAN boxes are [~]):
 - G3 (IMP-085): robustness.run_c2 (files only; C2(a) recurrence from recomputed signatures at ceil(0.7 n), C2(b) three-valued 4 of 5, c1_seed Holm p = max of the two p, never substituted), regression.write_ensemble / load_ensemble (crashed refit = no term, counted), run_c1 parallel over recordings (loky, worker-count independent). Ensemble seed 42 only.
@@ -40,9 +44,9 @@ G3, G5, G7 (2026-10-02, pilot subjects only, machinery done, real content waits 
 - Seeds: split 42 (extra 43-46); G0 blocks 91000 pilot, 92000 full, 93000 tuning, 94000 preprocessing gate, +10000 per fresh-seed round.
 
 ## Next
-Stage letters follow PLAN.md (G3 = C2 aggregation, G5 = C4 free-run, G7 = section 5.2 sensitivity, G8 = summary files).
-1. G8 (summary.json, equations.tex, and the Holm adjustment: 11 members when C4 is attempted, 8 otherwise, once every member of that family has a raw p). G3, G5 and G7 real content waits for the frozen equation (pilot PySR stage) and the gate.
-2. Stage H (figures), then pilot (--pilot; E5 PySR stage with A never run yet; estimated 8-12 h, run in checkpointed stages, time one series first, stop if > 12 h; it also produces the first frozen equation, which G4 and G1 need), Stage J (lock placeholders, limitations note incl. G0 covers only the limit-cycle regime), Stage I (full G0), Stage K (full run), Stage L (requirements.txt, README, LICENSE; pin joblib 1.6.0, specparam 2.0.0rc7, pysr etc.). Check PLAN.md for exact stage letters.
+Stage letters follow PLAN.md (G3 = C2 aggregation, G5 = C4 free-run, G7 = section 5.2 sensitivity, G8 = summary files, H0 = phase wiring, H1 = figures). Order decided 2026-10-02: G8 (done), H0 (done), pilot prerequisites, then the pilot, THEN H1 (figures, so they are reviewed against real outputs).
+1. Pilot prerequisites (see the pilot-prerequisites report): the E5 PySR stage on synthetic series with filter A (estimated 8-12 h, run in checkpointed stages, time one series first, stop if > 12 h), and the real-data phase 2 pilot driver (primary fit and frozen-equation write; the frozen equation comes from this driver, not from the E5 stage). G3, G4, G5 and G7 real content waits for the frozen equation.
+2. Stage I (pilot, with its checklist), Stage J (lock placeholders, limitations note incl. G0 covers only the limit-cycle regime), Stage K (full run; phase 1 includes the FULL G0, whose driver is not built), Stage L (requirements.txt, README, LICENSE; pin joblib 1.6.0, specparam 2.0.0rc7, pysr etc.). Note: the full G0 is Stage K phase 1, not Stage I (Stage I is the pilot).
 3. Open from section 21.2: noise-adaptive R (largely moot), OS affinity mask/SMT pairing (Windows, FF mask honoured by Julia), worker count 4/6/8 benchmark, Numba validation (passed in C5).
 
 ## Lessons
@@ -53,4 +57,4 @@ Stage letters follow PLAN.md (G3 = C2 aggregation, G5 = C4 free-run, G7 = sectio
 
 ## Verify first
 git log --oneline --decorate -15 ; git status ; .\.venv\Scripts\python.exe -m pytest -rs -q ; git tag
-Expect clean tree, 929 passed / 1 skipped / 3 deselected, tag prereg-v0.6.
+Expect a clean tree, 1099 passed / 1 skipped / 3 deselected, tag prereg-v0.6.

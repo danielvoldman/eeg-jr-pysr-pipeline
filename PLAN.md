@@ -10,12 +10,12 @@ This is the **build** order. The **run** order is different and is fixed by §16
 
 ## Stage 0: Manual setup (done by me, not Claude Code)
 
-- [ ] Repo folder, `git init`, and `.gitignore` copied from §18.3
-- [ ] `PREREGISTRATION.md`: v0.6 converted from .docx, with the §7.6 and §8.2 tables checked
-- [ ] `CLAUDE.md`, `PLAN.md` and `DEVIATIONS.md` in place
-- [ ] `config.yml` seeded with the §7.3 and §7.6 values and their provenance tags
-- [ ] `.venv` created and the Python version chosen
-- [ ] First commit
+- [x] Repo folder, `git init`, and `.gitignore` copied from §18.3 (checked 2026-10-02: every §18.3 line is present; one line beyond it, `.pytest_cache/`)
+- [~] `PREREGISTRATION.md`: v0.6 converted from .docx, with the §7.6 and §8.2 tables checked (the file exists, first commit a035a06, tag prereg-v0.6; no record of the table check exists in the repo, so that part stays open for the owner)
+- [x] `CLAUDE.md`, `PLAN.md` and `DEVIATIONS.md` in place
+- [x] `config.yml` seeded with the §7.3 and §7.6 values and their provenance tags (meta.config_seeded 2026-09-28)
+- [x] `.venv` created and the Python version chosen (Python 3.12.10)
+- [x] First commit (a035a06, 2026-09-28)
 
 ---
 
