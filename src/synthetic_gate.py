@@ -1056,6 +1056,16 @@ def _tune_worker(payload):
         return tuning.recording_nis(segments, starts, cfg, q, filter_name)
 
 
+def g0_q(cfg, filter_name, tuned_q=None):
+    """The q every G0 series runs at (DEV-005, IMP-090): passes.resolve_q, i.e. ukf.process_noise.q_fixed, for the adopted
+    options (A, B). The section 7.5 NIS rule is still run and reported but never decides. The dropped 19-D option keeps its
+    NIS-tuned q (resolve_q refuses it an implicit q); None when that rule refused. q is never chosen by which value makes
+    G0 pass."""
+    if filter_name == "19D":
+        return None if tuned_q is None else float(tuned_q)
+    return passes_module.resolve_q(cfg, None, filter_name)
+
+
 def tune_g0_q_option(cfg, series, filter_name, cache_dir=None, n_jobs=1, min_recordings=None):
     """G0's own q for filter A or B: the same NIS rule (tuning.select_q) over the same grid, with the gate's own worker
     because tuning.tune_q's worker cannot see the patched filter. The cache key carries the filter name and the source
@@ -1550,7 +1560,7 @@ def _z_summary(records):
     return {"median": float(np.median(zs)), "max": float(np.max(zs))}
 
 
-def option_summary(cfg, filter_name, qr, recs, runtime, std_refusal=None):
+def option_summary(cfg, filter_name, qr, recs, runtime, std_refusal=None, q_run=None):
     """The compact per option x level comparison of one filter option from its records (recs maps a set name to the
     records of that set). qr is the tuning.QRResult of the option; runtime a dict of wall seconds."""
     pos = recs["positive"]
@@ -1586,7 +1596,10 @@ def option_summary(cfg, filter_name, qr, recs, runtime, std_refusal=None):
                          "mean_nis_at_q": None if row is None else row["mean_nis"], "nis_target": qr.target, "nis_band": qr.band,
                          "in_band": bool(qr.in_band), "at_grid_edge": bool(qr.at_grid_edge), "nis_spread": qr.nis_spread,
                          "n_recordings": qr.n_recordings, "n_matched": qr.n_matched, "table": qr.table,
-                         "diagnostic_flag_off_tuning": std_refusal is not None, "standard_rule_refusal": std_refusal}
+                         "diagnostic_flag_off_tuning": False, "standard_rule_refusal": std_refusal,
+                         "reported_only": q_run is not None}
+    if q_run is not None:
+        out["q_run"] = dict(q_run)
     return out
 
 
@@ -1630,15 +1643,22 @@ def format_comparison(report):
     lines = []
     for name, o in report["options"].items():
         t = o.get("tuning")
-        if t is None or t["q"] is None:
+        qr_ = o.get("q_run")
+        if qr_ is None and (t is None or t["q"] is None):
             lines.append(f"== option {name}: q refused, no evaluation ({t['refusal_reason'] if t else None}) ==")
             continue
-        lines.append(f"== option {name}: q {t['q']:.3g}, mean NIS {t['mean_nis_at_q']:.2f} (target {t['nis_target']:g} +- "
-                     f"{t['nis_band']:g}), in_band {t['in_band']}, at_grid_edge {t['at_grid_edge']} ==")
-        sr = t.get("standard_rule_refusal")
+        if qr_ is not None:
+            lines.append(f"== option {name}: G0 runs at q {qr_['q']:.3g} ({qr_['source']}) ==")
+            if t is not None and t["q"] is not None:
+                lines.append(f"   section 7.5 NIS rule (REPORTED ONLY, not used): q {t['q']:.3g}, mean NIS {t['mean_nis_at_q']:.2f} "
+                             f"(target {t['nis_target']:g} +- {t['nis_band']:g}), in_band {t['in_band']}, at_grid_edge {t['at_grid_edge']}")
+        else:
+            lines.append(f"== option {name}: q {t['q']:.3g}, mean NIS {t['mean_nis_at_q']:.2f} (target {t['nis_target']:g} +- "
+                         f"{t['nis_band']:g}), in_band {t['in_band']}, at_grid_edge {t['at_grid_edge']} ==")
+        sr = t.get("standard_rule_refusal") if t is not None else None
         if sr:
-            lines.append(f"   q is DIAGNOSTIC (tuned with the state-SD flag disabled): the section 7.5 rule refused under the standard rule "
-                         f"({sr['reason']}); series diverged per q {[d['n_diverged'] for d in sr['n_diverged_per_q']]} of {sr['n_recordings']}")
+            lines.append(f"   section 7.5 rule refused under the standard rule (reported only): {sr['reason']}; series diverged per q "
+                         f"{[d['n_diverged'] for d in sr['n_diverged_per_q']]} of {sr['n_recordings']}")
         s = o["stability_all_runs"]
         mn = "none" if s["min_eig_overall"] is None else f"{s['min_eig_overall']:.2e}"
         lines.append(f"   stability, all {s['n_runs']} UKF runs: negative-eig steps {s['n_negative_eig_steps']}, NaN/Inf {s['n_nan_inf']}, "
@@ -1749,27 +1769,26 @@ def run_pilot(cfg, root, n_jobs=None, estimate_only=False, options=None):
     for name in options:
         t = time.perf_counter()
         qr = tune_g0_q(cfg, sets["tuning"], name, cache_dir=cache_dir, n_jobs=n_workers)
-        emit(f"option {name}: tuned q {qr.q} (refused {qr.refused}) in {(time.perf_counter() - t) / 60:.1f} min")
+        emit(f"option {name}: section 7.5 NIS rule (reported only for A and B): q {qr.q} (refused {qr.refused}) in "
+             f"{(time.perf_counter() - t) / 60:.1f} min")
         std_refusal = None
         if qr.q is None:                      # the section 7.5 rule refuses under the standard divergence rule
             std_refusal = {"reason": qr.refusal_reason, "n_matched": qr.n_matched, "n_recordings": qr.n_recordings,
                            "n_diverged_per_q": [{"q": r["q"], "n_diverged": r["n_diverged"]} for r in qr.table]}
             emit(f"option {name}: section 7.5 rule refused under the standard rule ({qr.refusal_reason}); n diverged per q "
                  f"{[r['n_diverged'] for r in qr.table]}")
-            if cfg["g0"]["pilot"]["tuning_fallback"] == "flag_off_nis":
-                off = copy.deepcopy(cfg)
-                off["ukf"]["divergence"]["state_sd_multiple"] = float("inf")
-                qr = tune_g0_q(off, sets["tuning"], name, cache_dir=cache_dir, n_jobs=n_workers)
-                emit(f"option {name}: DIAGNOSTIC tuning with the state-SD flag disabled: q {qr.q} (refused {qr.refused})")
         tune_s = time.perf_counter() - t
-        if qr.q is None:
+        q_used = g0_q(cfg, name, qr.q)
+        if q_used is None:                    # the dropped 19D option, whose q only the NIS rule can give
             summaries[name] = {"filter": name, "tuning": {"q": None, "refused": True, "refusal_reason": qr.refusal_reason,
                                                           "standard_rule": std_refusal}}
             continue
+        q_run = {"q": q_used, "source": "tuned_19D" if name == "19D" else "q_fixed", "nis_rule_used": name == "19D"}
+        emit(f"option {name}: G0 runs at q {q_used:g} ({q_run['source']})")
         jobs = [(s, ser) for s in KIND_SETS for ser in sets[s]]
         t = time.perf_counter()
         results = Parallel(n_jobs=n_workers, backend=cfg["compute"]["joblib_backend"])(
-            delayed(_series_worker)((cfg, ser, name, float(qr.q))) for _, ser in jobs)
+            delayed(_series_worker)((cfg, ser, name, float(q_used))) for _, ser in jobs)
         eval_s = time.perf_counter() - t
         recs = {s: [] for s in KIND_SETS}
         for (s, _), r in zip(jobs, results):
@@ -1778,7 +1797,7 @@ def run_pilot(cfg, root, n_jobs=None, estimate_only=False, options=None):
         records_by_option[name] = recs
         runtime = {"tuning_s": tune_s, "evaluation_s": eval_s, "series_busy_s": float(sum(r["runtime_s"] for r in results)),
                    "n_series": len(results)}
-        summaries[name] = option_summary(cfg, name, qr, recs, runtime, std_refusal)
+        summaries[name] = option_summary(cfg, name, qr, recs, runtime, std_refusal, q_run)
         sections = {"positive": positive_verdict(cfg, recs["positive"]), "null_A": null_arm_verdict(cfg, recs["null_A"]),
                     "null_B": null_arm_verdict(cfg, recs["null_B"]), "contraction": contraction_verdict(cfg, recs["positive"]),
                     "stability": stability_verdict(recs["positive"]), "gain_profile": gain_profile(cfg, recs["positive"]),
@@ -1788,8 +1807,9 @@ def run_pilot(cfg, root, n_jobs=None, estimate_only=False, options=None):
                     "preprocessing": {"null": null_arm_verdict(cfg, recs["gate_null"]),
                                       "note": "UKF part only; the PySR NRMSE is pending"}}
         doc = build_gate_document(cfg, root, pilot=True, filter_name=name, verdicts=option_verdicts(cfg, recs), sections=sections,
-                                  q={"q": qr.q, "in_band": qr.in_band, "at_grid_edge": qr.at_grid_edge,
-                                     "diagnostic_flag_off_tuning": std_refusal is not None, "standard_rule_refusal": std_refusal})
+                                  q=dict(q_run, nis_rule_reported={"q": qr.q, "refused": bool(qr.refused), "in_band": bool(qr.in_band),
+                                                                      "at_grid_edge": bool(qr.at_grid_edge),
+                                                                      "standard_rule_refusal": std_refusal}))
         gate_docs[name] = str(write_gate(cfg, root, doc, gate_path(cfg, root, True, name)))
         emit(f"option {name}: {len(results)} series in {eval_s / 60:.1f} min wall")
     pairing = check_pairing(records_by_option)

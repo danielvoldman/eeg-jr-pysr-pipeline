@@ -505,7 +505,7 @@ g0:
     tuning_cache_subdir: {value: "tuning", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.cache_dir / g0.cache_subdir"}
     comparison_file: {value: "g0_filter_comparison.json", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.pilot_results_dir"}
     timing_file: {value: "g0_pilot_timing.json", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.pilot_results_dir"}
-    tuning_fallback: {value: "flag_off_nis", prov: placeholder, ref: "PLAN E5, IMP-070", note: "when the section 7.5 rule refuses under the standard divergence rule, q is tuned by the same NIS rule with the state-SD flag disabled in a config copy; DIAGNOSTIC ONLY, labelled in every output; any other value means no fallback"}
+    tuning_fallback: {value: "flag_off_nis", prov: placeholder, ref: "PLAN E5, IMP-070", note: "when the section 7.5 rule refuses under the standard divergence rule, q is tuned by the same NIS rule with the state-SD flag disabled in a config copy; DIAGNOSTIC ONLY, labelled in every output; any other value means no fallback; NOT READ by synthetic_gate.run_pilot since IMP-090 (G0 runs at ukf.process_noise.q_fixed), kept only for the diagnostic tool e6"}
     comparison_schema_version: {value: 1, prov: placeholder, ref: "PLAN E5, IMP-070"}
 
 # ---------------------------------------------------------------- split, subjects, seeds (§11, §17)

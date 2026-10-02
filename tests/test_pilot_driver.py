@@ -225,18 +225,25 @@ def stubbed(monkeypatch, tmp_path):
     monkeypatch.setattr(sg, "pilot_inputs", lambda c, r: (None, None))
     monkeypatch.setattr(sg, "pilot_series_sets", lambda c, g, t: _fake_sets())
     monkeypatch.setattr(sg, "time_option", lambda c, name, sets: _fake_timing(10.0))
-    monkeypatch.setattr(sg, "_series_worker", _stub_record)
+    ran_at = []
+
+    def worker(payload):
+        ran_at.append((payload[2], payload[3]))
+        return _stub_record(payload)
+
+    monkeypatch.setattr(sg, "_series_worker", worker)
     seen = []
 
     def tune(c, series, name, cache_dir=None, n_jobs=1, **kw):
         flag_off = c["ukf"]["divergence"]["state_sd_multiple"] == float("inf")
         seen.append((name, flag_off))
-        if name == "B" or (name == "A" and not flag_off):         # B refuses either way; A only under the standard rule
+        if name == "A":                                            # the NIS rule refuses for A under the standard rule
             return _qr(None, True)
-        return _qr(1e-2 if name == "19D" else 1e-3)
+        return _qr(1e-2 if name == "19D" else 3e-3)               # B's NIS rule picks 3e-3: reported, never used
 
     monkeypatch.setattr(sg, "tune_g0_q", tune)
     cfg["_seen_tuning_calls"] = seen
+    cfg["_ran_at"] = ran_at
     return cfg, tmp_path
 
 
@@ -267,7 +274,7 @@ def test_driver_report_values_files_and_the_printed_table(stubbed, capsys):
     cmp_path, _ = sg.comparison_paths(cfg, root)
     doc = json.loads(cmp_path.read_text(encoding="utf-8"))
     assert doc["pilot"] is True and doc["stage"] == "UKF-only (no PySR)" and "not decided" in doc["dev005_decision"]
-    assert doc["pairing"]["paired"] and doc["pairing"]["n_options"] == 2 and doc["pairing"]["n_series"] == 100
+    assert doc["pairing"]["paired"] and doc["pairing"]["n_options"] == 3 and doc["pairing"]["n_series"] == 100
     o = doc["options"]["19D"]
     assert o["tuning"]["q"] == pytest.approx(1e-2) and o["tuning"]["mean_nis_at_q"] == pytest.approx(1.9) and o["tuning"]["in_band"]
     for lv in "0123":
@@ -288,16 +295,26 @@ def test_driver_report_values_files_and_the_printed_table(stubbed, capsys):
     assert o["runtime"]["n_series"] == 100 and o["runtime"]["series_busy_s"] == pytest.approx(200.0)
     a = doc["options"]["A"]
     assert a["levels"]["1"]["gain_error_median_smoothed"] == pytest.approx(0.02) and a["nulls"]["null_A"]["n_out"] == 0
-    # option B: q refused, so no evaluation and no gate document
-    assert doc["options"]["B"]["tuning"]["refused"] is True and "levels" not in doc["options"]["B"]
-    assert doc["options"]["B"]["tuning"]["standard_rule"]["n_diverged_per_q"][7] == {"q": pytest.approx(0.1), "n_diverged": 7}
-    # tuning calls: 19D once (standard rule); A standard rule then the flag-off diagnostic; B both, refused both times
-    assert cfg["_seen_tuning_calls"] == [("19D", False), ("A", False), ("A", True), ("B", False), ("B", True)]
-    assert o["tuning"]["diagnostic_flag_off_tuning"] is False and o["tuning"]["standard_rule_refusal"] is None
-    ta = a["tuning"]
-    assert ta["diagnostic_flag_off_tuning"] is True and ta["q"] == pytest.approx(1e-3)
+    # IMP-090: A and B run at q_fixed whatever the NIS rule says (A refused it, B picked 3e-3); 19D keeps its tuned q
+    qf = CFG["ukf"]["process_noise"]["q_fixed"]
+    assert qf == pytest.approx(1e-2)
+    assert doc["options"]["A"]["q_run"] == {"q": pytest.approx(qf), "source": "q_fixed", "nis_rule_used": False}
+    assert doc["options"]["B"]["q_run"] == {"q": pytest.approx(qf), "source": "q_fixed", "nis_rule_used": False}
+    assert doc["options"]["B"]["tuning"]["q"] == pytest.approx(3e-3) and doc["options"]["B"]["tuning"]["reported_only"] is True
+    assert doc["options"]["19D"]["q_run"]["source"] == "tuned_19D" and doc["options"]["19D"]["q_run"]["nis_rule_used"] is True
+    assert {(n, round(q, 12)) for n, q in cfg["_ran_at"]} == {("19D", 1e-2), ("A", 1e-2), ("B", 1e-2)}
+    assert all(q == pytest.approx(qf) for n, q in cfg["_ran_at"] if n in ("A", "B"))
+    assert "levels" in doc["options"]["A"] and "levels" in doc["options"]["B"]       # A is evaluated although its NIS rule refused
+    ta = doc["options"]["A"]["tuning"]
+    assert ta["diagnostic_flag_off_tuning"] is False and ta["reported_only"] is True
     assert [d["n_diverged"] for d in ta["standard_rule_refusal"]["n_diverged_per_q"]] == list(range(8))
-    assert set(doc["gate_documents"]) == {"19D", "A"}
+    # the flag-off fallback is gone: one standard-rule tuning call per option and no flag-off call
+    assert cfg["_seen_tuning_calls"] == [("19D", False), ("A", False), ("B", False)]
+    assert o["tuning"]["diagnostic_flag_off_tuning"] is False and o["tuning"]["standard_rule_refusal"] is None
+    assert set(doc["gate_documents"]) == {"19D", "A", "B"}
+    gate_a = json.loads(Path(doc["gate_documents"]["A"]).read_text(encoding="utf-8"))
+    assert gate_a["q"]["q"] == pytest.approx(qf) and gate_a["q"]["source"] == "q_fixed"
+    assert gate_a["q"]["nis_rule_reported"]["refused"] is True and gate_a["q"]["nis_rule_reported"]["q"] is None
     # gate documents: pilot only, results/pilot only, never outputs/gate.json, and they cannot unlock real fitting
     for name, path in doc["gate_documents"].items():
         assert Path(path) == root / "results" / "pilot" / f"gate_{name}.json"
@@ -311,12 +328,15 @@ def test_driver_report_values_files_and_the_printed_table(stubbed, capsys):
     assert g19["would_hard_stop"] is True and g19["verdicts"]["null_A"] is False and g19["verdicts"]["positive"] is None
     assert g19["verdicts"]["contraction"] is False                                  # median m contraction 0.4 < 0.5
     ga = json.loads((root / "results" / "pilot" / "gate_A.json").read_text(encoding="utf-8"))
-    assert ga["q"]["diagnostic_flag_off_tuning"] is True and g19["q"]["diagnostic_flag_off_tuning"] is False
+    assert ga["q"]["source"] == "q_fixed" and g19["q"]["source"] == "tuned_19D"
     assert ga["would_hard_stop"] is False and ga["verdicts"]["null_A"] is None and ga["verdicts"]["positive"] is None   # PySR pending
     text = capsys.readouterr().out
-    assert text.count("== option") == 3 and "q refused" in text and "DIAGNOSTIC ONLY" in text
-    assert text.count("q is DIAGNOSTIC (tuned with the state-SD flag disabled)") == 1
-    assert len(re.findall(r"tuned q \S+ \(refused \w+\) in 0\.0 min", text)) == 3          # minutes, not a precedence slip
+    assert text.count("== option") == 3 and "q refused" not in text and "DIAGNOSTIC ONLY" in text
+    for hdr in ("== option A: G0 runs at q 0.01 (q_fixed) ==", "== option B: G0 runs at q 0.01 (q_fixed) ==",
+                "== option 19D: G0 runs at q 0.01 (tuned_19D) =="):
+        assert text.count(hdr) == 1, hdr
+    assert text.count("(REPORTED ONLY, not used)") == 2                                      # 19D has no such line; B reports 3e-3, A refused
+    assert len(re.findall(r"NIS rule \(reported only for A and B\): q \S+ \(refused \w+\) in 0\.0 min", text)) == 3   # minutes
     assert "series diverged per q [0, 1, 2, 3, 4, 5, 6, 7] of 20" in text
     row = re.search(r"^\s+L2\s+5\.4\s+5\s+0\s+10%\s+5%\s+30%\s+30%\s+0\.80\s+0\.40\s+\S+/\S+$", text, re.M)
     assert row, text
@@ -339,3 +359,25 @@ def test_e5_source_and_config_rules():
     raw = (SRC.parent.parent / "config.yml").read_text(encoding="utf-8")
     block = raw.split("  pilot:\n", 1)[1].split("\n\n", 1)[0]
     assert block.count("prov: placeholder") == 9 and "unset" not in block
+
+
+def test_g0_q_default_is_config_q_fixed_and_override_works():
+    assert sg.g0_q(CFG, "A") == pytest.approx(1e-2) and sg.g0_q(CFG, "B", 5e-4) == pytest.approx(1e-2)
+    c2 = copy.deepcopy(CFG)
+    c2["ukf"]["process_noise"]["q_fixed"] = 4.0e-3                         # the config is the single source
+    assert sg.g0_q(c2, "A") == pytest.approx(4e-3)
+
+
+def test_g0_q_19d_keeps_its_tuned_q_and_none_when_refused():
+    assert sg.g0_q(CFG, "19D", 2e-3) == pytest.approx(2e-3) and sg.g0_q(CFG, "19D", None) is None
+
+
+def test_g0_q_goes_through_passes_resolve_q(monkeypatch):
+    monkeypatch.setattr(sg.passes_module, "resolve_q", lambda cfg, q=None, filter_name=None: 0.123)
+    assert sg.g0_q(CFG, "A") == 0.123
+
+
+def test_run_pilot_source_never_reads_the_fallback_or_the_flag_off_tuning():
+    src = Path(sg.__file__).read_text(encoding="utf-8")
+    body = src[src.index("def run_pilot"):src.index("# ---------------------------------------------------------------- the E1 report")]
+    assert "tuning_fallback" not in body and "state_sd_multiple" not in body and "copy.deepcopy" not in body
