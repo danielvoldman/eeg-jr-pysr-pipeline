@@ -288,6 +288,9 @@ ukf:
     state_sd_multiple: {value: 10, prov: locked, ref: "§7.5"}
     recording_fraction: {value: 0.10, prov: locked, ref: "§7.5"}
     startup_exempt_s: {value: 0.5, prov: placeholder, ref: "§7.5, §10.2, DEV-003", note: "the state-beyond-10-SD flag (only that flag) is suppressed for this long after each (re)initialization; NaN/Inf, covariance-not-PD and linalg checks stay active from step 1; matches the 0.5 s burn-in of §10.2"}
+    state_dwell_s: {value: 0.5, prov: placeholder, ref: "§7.5, DEV-007", note: "the state-beyond-10-SD clause fires only after this many CONSECUTIVE observation samples beyond the multiple (the existing 0.5 s settling constant of DEV-003 and the 10.2 burn-in); 0 reproduces the legacy first-crossing rule bit for bit; chosen AFTER the event durations of the planning diagnostics had been seen (DEV-007); NOT READ BY ANY CODE until the DEV-007 implementation commit"}
+    parameter_sd_multiple: {value: 8, prov: placeholder, ref: "§7.5, §7.6, DEV-007", note: "parameter clause: the filtered posterior mean of p1, p2, log_rho1, log_rho2, g12, g21, m (those in the state, m unclipped) farther than this many prior SD from the 7.6 prior mean for parameter_dwell_s of consecutive samples is a divergence; null reproduces the legacy rule; fixed before the selection test, no post-hoc k"}
+    parameter_dwell_s: {value: 0.5, prov: placeholder, ref: "§7.5, DEV-007", note: "consecutive-sample requirement of the parameter clause"}
     reference_refresh_fraction_of_prior_sd: {value: 0.05, prov: placeholder, ref: "§7.5, IMP-029", note: "the divergence reference (deterministic fixed point at the current posterior-mean parameters) is recomputed when any parameter mean has moved more than this fraction of its prior SD from the cached parameters"}
     fixed_point_tolerance: {value: 1.0e-10, prov: placeholder, ref: "§7.5, IMP-029", note: "max |S - F(S)| of the coupled fixed-point solve"}
     fixed_point_max_iterations: {value: 50, prov: placeholder, ref: "§7.5, IMP-029"}
@@ -435,6 +438,7 @@ g0:
     preprocessing_gate: {value: 94000, prov: placeholder, ref: "§5.2, IMP-063"}
     grid: {value: 95000, prov: placeholder, ref: "§9.1, IMP-063", note: "regime-grid simulations (E1); not named in the approval, added as its own block"}
     fresh_round_stride: {value: 10000, prov: placeholder, ref: "§9.4, IMP-063", note: "added per fresh-seed round after any pipeline fix"}
+    rule_selection: {value: 96000, prov: placeholder, ref: "DEV-007, IMP-091", note: "seed block of the divergence-rule selection test (series i of a stream uses default_rng([block, arm code, substream code, i])); never a G0 block; the exploratory block 99000 of the planning diagnostics is burnt and unused"}
     arm_codes: {value: {positive: 1, null_A: 2, null_B: 3, artifact_null: 4}, prov: placeholder, ref: "§9.1, IMP-065", note: "series rng = default_rng([block + round x stride, arm code, substream code, i]); the operating-point draw uses arm code 0, so series i of every arm shares its operating point"}
     substreams: {value: {input: 1, mixing: 2, noise: 3, common_input: 4, artifacts: 5}, prov: placeholder, ref: "§9.1, IMP-065"}
   series_duration_s: {value: 240, prov: placeholder, ref: "§9.4, IMP-065", note: "clean duration after the burn-in and the two edge trims; one 4-minute recording"}
@@ -507,6 +511,20 @@ g0:
     timing_file: {value: "g0_pilot_timing.json", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.pilot_results_dir"}
     tuning_fallback: {value: "flag_off_nis", prov: placeholder, ref: "PLAN E5, IMP-070", note: "when the section 7.5 rule refuses under the standard divergence rule, q is tuned by the same NIS rule with the state-SD flag disabled in a config copy; DIAGNOSTIC ONLY, labelled in every output; any other value means no fallback; NOT READ by synthetic_gate.run_pilot since IMP-090 (G0 runs at ukf.process_noise.q_fixed), kept only for the diagnostic tool e6"}
     comparison_schema_version: {value: 1, prov: placeholder, ref: "PLAN E5, IMP-070"}
+  rule_selection:
+    e_max: {value: 3, prov: placeholder, ref: "DEV-007, IMP-091", note: "truth-based runaway label: centred RMS error of a filtered PSP state (y0, y1, y2 of both nodes) over the true state's SD above this ratio (a constant predictor scores 1)"}
+    parameter_label_sd_multiple: {value: 8, prov: placeholder, ref: "DEV-007, IMP-091", note: "truth-based runaway label: the time-mean filtered p1, p2, log_rho1, log_rho2, g12, g21 or m farther than this many prior SD from the TRUE value (not from the prior)"}
+    sensitivity_min: {value: 0.9, prov: placeholder, ref: "DEV-007, IMP-091", note: "flagged / labelled-runaway runs, pooled over the runaway configurations and the runaway-labelled runs of the healthy ones; point estimate; Clopper-Pearson reported"}
+    false_positive_max: {value: 0.05, prov: placeholder, ref: "DEV-007, IMP-091", note: "flagged / labelled-healthy runs, pooled; point estimate; Clopper-Pearson reported"}
+    n_per_config: {value: 20, prov: placeholder, ref: "DEV-007, IMP-091"}
+    min_labelled_each: {value: 20, prov: placeholder, ref: "DEV-007, IMP-091", note: "fewer labelled-runaway or labelled-healthy runs than this: the test is INCONCLUSIVE and stops with a report, nothing is re-picked"}
+    healthy_worst_case: {value: {p_grid_indices: [0, 1], input_sd_factor: 2.0, noise_share: 0.5, level_index: 3}, prov: placeholder, ref: "DEV-007, IMP-091", note: "constructed ruler worst case: true limit cycle at the two lowest grid p, the largest input-noise factor, the strongest coupling; series alternate the two p values"}
+    runaway_q: {value: [0.3, 1.0], prov: placeholder, ref: "DEV-007, IMP-091", note: "filter A at these q (q_fixed is 1e-2; the NIS grid tops out at 0.1)"}
+    runaway_prior_p_displacement_sd: {value: 7, prov: placeholder, ref: "DEV-007, IMP-091", note: "filter A at q_fixed with priors.p_mean displaced by this many prior SD (the parameter clause reads the same configured prior, stated limitation)"}
+    runaway_data_amplitude_factor: {value: 3, prov: placeholder, ref: "DEV-007, IMP-091", note: "data deviations from mu_ref multiplied by this (the fixed sigma_ref is then wrong)"}
+    runaway_filter_19d_q: {value: 1.0e-2, prov: placeholder, ref: "DEV-007, IMP-091", note: "the dropped 19-D filter on the same 1/f data at this q (the DEV-005 runaway)"}
+    output_file: {value: "rule_selection.json", prov: placeholder, ref: "IMP-091", note: "under paths.pilot_results_dir; write-once"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-091"}
 
 # ---------------------------------------------------------------- split, subjects, seeds (§11, §17)
 split:

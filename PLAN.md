@@ -512,6 +512,10 @@ Done when: the four phase runners replace the stubs; a full phase 2 to 4 refuses
 
 Note (2026-10-02): runners, flags, resumability, step plans and the phase-1 pieces are built and tested (tests/test_phases.py, 46 tests; 21 mutation checks). Real pilot run: `--phase 1 --pilot` writes the four per-variant exclusion files (0 of 16 units-check failures, sub-051 ses-t2 excluded for 20.0 s of clean data, as in B6), the impulse responses and a JSON flag with low_confidence true; a second call skips every step; `--phase 2 --pilot` skips the baseline, runs the Q/R NIS report and stops at the unbuilt primary fit (no flag). Phase 3 pilot steps were run directly (no phase 2 flag exists): C2 written with an undetermined verdict, summary rewritten. NOT BUILT, so the box is [~]: the real-data primary fit and frozen-equation driver of phase 2 (separate step), the full G0 driver of phase 1 (Stage K) and src/figures.py of phase 4 (H1).
 
+### [~] F2. Divergence rule fix (DEV-007, IMP-091; approved 2026-10-02)
+Read: §7.5, §9.2, §10.2, §20, DEV-003, DEV-005, DEV-006, IMP-069, IMP-086, IMP-090.
+Steps, in order, each its own commit: (1) docs and config leaves, BEFORE any run (DEV-007, IMP-091); (2) dwell and parameter clause in the kernels, dwell off = legacy bit for bit, tests and mutations; (3) the selection test on seed block 96000 (acceptance: sensitivity >= 0.9, false positives <= 0.05, stop and report on failure, no re-picking); (4) only if it passes: one fresh G0 pilot round (round 1) for filter A at q_fixed, old gate files and divergence-dependent pilot files to results/pilot/superseded/. A null failure afterwards is a legitimate hard stop and is reported, never loosened.
+
 ### [ ] H1. Nine figures
 Read: §19.
 Done when:
