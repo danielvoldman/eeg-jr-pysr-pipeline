@@ -486,9 +486,11 @@ Done when wPLI, imaginary coherency and the AAFT test (10 recordings × 50 surro
 
 Note (2026-10-01, merged G2 stage; IMP-082): done on pilot data only. robustness.connectivity (plain wPLI, imaginary coherency signed, 2-s Hann epochs, 0.5-Hz grid, bands 8 to 13 and 1 to 45 Hz), connectivity_summary (median and IQR, no test), AAFT (per clean segment and channel, seed 42, rng [seed, recording_index, surrogate_index], p = (1 + k) / (N + 1), diverged surrogate counts as exceeding, diverged real recording replaced), run_diagnostics, results/pilot/diagnostics_42.json. Pilot run: 405 s on 4 workers (loky); only 6 of the 12 pilot recordings had a non-diverged real M2 run, so AAFT ran on 6 recordings (not 10): 3 of 6 with p < 0.05, mechanics only. The confirmatory run (10 test recordings) is not done.
 
-### [ ] G7. §5.2 sensitivity analysis
+### [~] G7. §5.2 sensitivity analysis (machinery done and run on the 12 pilot subjects; the 20-subject confirmatory run waits for the gate)
 Read: §5.2.
 Done when the M2 UKF has been run on 20 training subjects under each of the 4 preprocessing variants.
+
+Note (2026-10-01; IMP-087): robustness.variant_loader, resolve_sensitivity_subjects, sensitivity_recording, sens_matched, sens_summary, run_sensitivity; the 4 variants are statistics.sensitivity.variants (locked); descriptive only (median absolute relative change against hp0.5_default, 'robust' at 0.15, Spearman unthresholded, p excluded, matched subjects only). tests/test_sensitivity.py (14 tests), 14 mutation checks. Pilot real data (12 subjects stand in for 20, 95 s on 4 workers for 48 recordings): recording-level divergence 6 of 12 at 0.5 Hz (default and strict alike) and 9 of 12 at 0.1 Hz, so only 3 subjects (sub-056, 063, 082) are matched; strict rejection changed nothing for them; against the reference the 0.1 Hz variant moves the E/I terms by a median 7 and 4 percent (robust) and the gains by 19 and 62 percent (not robust), on 3 subjects only. NOT done, so the box is [~]: the 20-subject run on the Q/R draw needs the gate, which does not exist yet.
 
 ### [ ] G8. summary.json and equations.tex
 Read: §18.2.

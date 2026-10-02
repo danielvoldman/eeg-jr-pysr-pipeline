@@ -586,6 +586,15 @@ statistics:
     output_pattern: {value: "c2_{seed}.json", prov: placeholder, ref: "§18.1, IMP-085", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
     schema_version: {value: 1, prov: placeholder, ref: "IMP-085"}
     ensemble_seed: {value: 42, prov: locked, ref: "§8.2, §11.1, IMP-085", note: "the refit ensemble runs on the primary split seed only"}
+  sensitivity:
+    output_pattern: {value: "sensitivity_{seed}.json", prov: placeholder, ref: "§5.2, §18.1, IMP-087", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
+    cache_subdir: {value: "sensitivity", prov: placeholder, ref: "§5.2, IMP-087", note: "per (recording, variant) parameters under paths.cache_dir"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-087"}
+    variants: {value: [{name: "hp0.5_default", highpass: false, strict: false}, {name: "hp0.5_strict", highpass: false, strict: true}, {name: "hp0.1_default", highpass: true, strict: false}, {name: "hp0.1_strict", highpass: true, strict: true}], prov: locked, ref: "§5.2", note: "high-pass 0.5 vs 0.1 Hz (preprocessing.sensitivity_highpass_hz) crossed with default vs strict rejection (preprocessing.strict_variant)"}
+    reference_variant: {value: "hp0.5_default", prov: placeholder, ref: "§5.2, IMP-087", note: "decided 2026-10-01 (Daniel Voldman): the primary pipeline is the reference"}
+    robust_median_abs_change_max: {value: 0.15, prov: placeholder, ref: "§5.2, IMP-087", note: "a judged parameter is 'robust' to a variant if the median over matched subjects of |value - reference| / |reference| is at most this; descriptive, no test"}
+    judged_parameters: {value: [log_rho1, log_rho2, g12, g21], prov: placeholder, ref: "§5.2, IMP-087", note: "the E/I terms (log rho1, log rho2) and the coupling gains; p is excluded (only meaningful relative to the rescaling reference, §5.1)"}
+    descriptive_parameters: {value: [m, p1, p2], prov: placeholder, ref: "§5.2, IMP-087", note: "reported with the same statistics but never judged"}
   c4:
     output_pattern: {value: "c4_{seed}.json", prov: placeholder, ref: "§18.1, IMP-086", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
     cache_subdir: {value: "c4_freerun", prov: placeholder, ref: "§18.1, IMP-086", note: "per-recording window errors under paths.cache_dir"}

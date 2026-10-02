@@ -1620,3 +1620,215 @@ def run_c4(cfg, root, seed, *, pilot, confirmatory=False, loader=None, pilot_ids
                                                       "against the limit"},
                  freerun_contrast=contrast, holm_raw_p={k: v["p"] for k, v in contrast.items()})
     return finish("attempted", extra)
+
+
+# ==== G7: §5.2 preprocessing-sensitivity analysis on real data (IMP-087) ============================================
+
+def variant_loader(cfg, root, pilot_ids, allow_all):
+    """load(subject, variant) -> the recording of the subject's ses-t1 file through B4/B5 with the variant's flags
+    (variant: {"name", "highpass", "strict"} of statistics.sensitivity.variants), cached under the preprocessing cache, and
+    the B6 decision of that variant; the same shape as tuning.make_real_loader. The development guard of preprocess.py stays
+    on (allow_all only for the confirmatory run)."""
+    from src import preprocess as pp
+    root = Path(root)
+    manifest = pp.load_manifest(root / cfg["paths"]["manifest_file"])
+    cache_root = root / cfg["paths"]["cache_dir"]
+    data_root = root / cfg["paths"]["data_dir"]
+    session = cfg["dataset"]["session_first"]
+
+    def load(subject, variant):
+        pattern = cfg["dataset"]["eeg_glob"].replace("sub-*", subject, 1)
+        files = [f for f in sorted(data_root.glob(pattern)) if session in f.parts]
+        if len(files) != 1:
+            return {"reason": f"{len(files)} {session} EDF files found"}
+        res = pp.segment_recording(cfg, files[0], data_root, manifest, pilot_ids, allow_all=allow_all,
+                                   sensitivity_highpass=bool(variant["highpass"]), strict=bool(variant["strict"]),
+                                   cache_root=cache_root)
+        decision = pp.recording_decision(cfg, res.meta, res.meta)
+        if decision["status"] != "kept":
+            return {"reason": f"excluded: {decision['reason']}"}
+        key = "b5:" + pp.cache_key_b5(cfg, res.meta["sha256"], bool(variant["highpass"]), bool(variant["strict"]))
+        return {"reason": None, "segments": res.segments, "starts": res.starts, "key": key}
+
+    return load
+
+
+def resolve_sensitivity_subjects(cfg, root, seed, *, pilot, confirmatory=False, pilot_ids=None):
+    """The subjects of the §5.2 sensitivity run: TRAINING subjects only, never the test list (guard layer 1). Pilot: the
+    pilot subjects (all on the training side, checked; 12 stand in for the 20). Confirmatory (needs confirmatory=True and a
+    gate that permits it): the training subjects in the order of the §7.5 Q/R draw (tuning.draw_for_split, draw seed
+    qr_rule.draw_seed_offset + the split seed), of which run_sensitivity keeps the first sensitivity_subjects whose reference
+    recording is usable."""
+    import main as main_mod
+    from src import tuning
+    root = Path(root)
+    if pilot:
+        if confirmatory:
+            raise GuardError("confirmatory scoring is not a pilot run")
+        if pilot_ids is None:
+            from src import preprocess as pp
+            pilot_ids = pp.load_pilot_ids(cfg, root)
+        pilot_ids = frozenset(pilot_ids)
+        train = set(main_mod.training_subjects(seed, root, cfg))
+        if not pilot_ids <= train:
+            raise GuardError("a pilot subject is not on the training side of the split")
+        return SubjectPlan("pilot", tuple(sorted(pilot_ids)), pilot_ids, allow_all=False)
+    if confirmatory is not True:
+        raise GuardError("a non-pilot run must pass confirmatory=True explicitly")
+    tuning.check_gate(cfg, root)
+    train = main_mod.training_subjects(seed, root, cfg)
+    return SubjectPlan("confirmatory", tuple(tuning.draw_for_split({"train": train}, seed, cfg)), frozenset(), allow_all=True)
+
+
+def sensitivity_recording(rec, cfg, filter_name=None):
+    """The continuous M2 pass 1 with smoother of one recording under one variant (filter A, q_fixed): the recording-level
+    parameters (means of the smoothed trajectories over the post-burn-in samples, §7.5), the divergence verdict and the clean
+    time. params is None when no sample entered the means (everything diverged)."""
+    fname = passes.resolve_filter(cfg, filter_name)
+    p1 = passes.run_pass1(rec["segments"], rec["starts"], cfg, q=passes.resolve_q(cfg, None, fname), forward_only=False,
+                          filter_name=fname, spec=passes.make_spec(cfg, fname, rec["segments"]))
+    fs = cfg["preprocessing"]["observation_fs_hz"]
+    keys = list(cfg["statistics"]["sensitivity"]["judged_parameters"]) + list(cfg["statistics"]["sensitivity"]["descriptive_parameters"])
+    return {"recording_diverged": bool(p1.recording_diverged), "n_clean": int(p1.n_clean), "clean_s": p1.n_clean / fs,
+            "n_diverged": int(p1.n_diverged), "diverged_fraction": float(p1.diverged_fraction),
+            "n_segments": len(p1.segments), "n_segments_diverged": int(sum(bool(s.diverged) for s in p1.segments)),
+            "params": None if p1.params is None else {k: float(getattr(p1.params, k)) for k in keys}}
+
+
+def _sens_worker(payload):
+    """Top-level (Windows spawn): one recording under one variant."""
+    from threadpoolctl import threadpool_limits
+    rec, cfg, filter_name, cache_path = payload
+    hit = _cache_json(cache_path)
+    if hit is not None:
+        return hit
+    with threadpool_limits(limits=1):
+        out = sensitivity_recording(rec, cfg, filter_name)
+    _cache_json_write(cache_path, out)
+    return out
+
+
+def sens_matched(table, variants):
+    """The subjects usable in EVERY variant: kept (not excluded), not diverged at recording level and with parameters.
+    table: {subject: {variant name: None (excluded) or the sensitivity_recording dict}}."""
+    names = [v["name"] for v in variants]
+    return sorted(s for s, row in table.items()
+                  if all(row.get(n) is not None and not row[n]["recording_diverged"] and row[n]["params"] is not None for n in names))
+
+
+def sens_summary(table, matched, variants, cfg):
+    """Descriptive sensitivity of the recording-level parameters to the variant, on the matched subjects only, against the
+    reference variant: per parameter and variant the median over subjects of |value - reference| / |reference|, the share of
+    subjects, the Spearman rank correlation with the reference (reported, no threshold), and for the JUDGED parameters
+    (E/I terms log rho1, log rho2 and the coupling gains; p is not judged, §5.2) 'robust' = that median is at most
+    robust_median_abs_change_max. No test, nothing is tuned."""
+    from scipy import stats
+    sc = cfg["statistics"]["sensitivity"]
+    ref = sc["reference_variant"]
+    limit = float(sc["robust_median_abs_change_max"])
+    judged = list(sc["judged_parameters"])
+    out = {}
+    for v in variants:
+        name = v["name"]
+        if name == ref:
+            continue
+        out[name] = {}
+        for k in judged + list(sc["descriptive_parameters"]):
+            r = np.array([table[s][ref]["params"][k] for s in matched], dtype=np.float64)
+            x = np.array([table[s][name]["params"][k] for s in matched], dtype=np.float64)
+            entry = {"n": int(r.size), "judged": k in judged, "median_abs_relative_change": None, "robust": None,
+                     "spearman": None, "median_abs_reference": None}
+            if r.size:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    change = np.abs(x - r) / np.abs(r)
+                entry["median_abs_relative_change"] = float(np.median(change))
+                entry["median_abs_reference"] = float(np.median(np.abs(r)))
+                if k in judged:
+                    entry["robust"] = bool(entry["median_abs_relative_change"] <= limit)
+            if r.size > 2 and np.ptp(r) > 0 and np.ptp(x) > 0:
+                entry["spearman"] = float(stats.spearmanr(r, x)[0])
+            out[name][k] = entry
+    return out
+
+
+def run_sensitivity(cfg, root, seed, *, pilot, confirmatory=False, loader=None, pilot_ids=None, use_cache=True, force=False,
+                    filter_name=None, n_jobs=None):
+    """The §5.2 real-data sensitivity analysis (G7): the continuous M2 UKF (no PySR) under each of the 4 preprocessing variants
+    on the training subjects, descriptive only. Pilot: the pilot subjects, results/pilot/, mechanics only. The recordings are
+    loaded here (the guard stays in this process); the filter runs go to the loky pool. A subject enters the summary only
+    if it is usable in all variants; per-variant counts of kept, excluded and diverged recordings are reported plainly."""
+    from src import tuning
+    root = Path(root)
+    plan = resolve_sensitivity_subjects(cfg, root, seed, pilot=pilot, confirmatory=confirmatory, pilot_ids=pilot_ids)
+    sc = cfg["statistics"]["sensitivity"]
+    variants = [dict(v) for v in sc["variants"]]
+    names = [v["name"] for v in variants]
+    ref_name = sc["reference_variant"]
+    if ref_name not in names or len(variants) != int(cfg["g0"]["preprocessing_gate"]["sensitivity_variants"]):
+        raise RobustnessError("the variants must be the 4 of §5.2 and include the reference variant")
+    if loader is None:
+        loader = variant_loader(cfg, root, plan.pilot_ids, plan.allow_all)
+    loader = guarded_loader(loader, plan)
+    ref_v = next(v for v in variants if v["name"] == ref_name)
+    n_want = int(cfg["g0"]["preprocessing_gate"]["sensitivity_subjects"])
+    chosen, recs, skipped = [], {}, []
+    for sid in plan.ids:
+        if len(chosen) == n_want:
+            break
+        res = loader(sid, ref_v)
+        if res["reason"] is not None:
+            skipped.append({"subject": sid, "variant": ref_name, "reason": res["reason"]})
+            continue
+        chosen.append(sid)
+        recs[sid, ref_name] = res
+    excluded = {}
+    for sid in chosen:
+        for v in variants:
+            if v["name"] == ref_name:
+                continue
+            res = loader(sid, v)
+            if res["reason"] is not None:
+                excluded[sid, v["name"]] = res["reason"]
+            else:
+                recs[sid, v["name"]] = res
+    cache_dir = (root / cfg["paths"]["cache_dir"] / sc["cache_subdir"]) if use_cache else None
+    fname = passes.resolve_filter(cfg, filter_name)
+    tasks, payloads = sorted(recs), []
+    for sid, name in tasks:
+        r = recs[sid, name]
+        path = None
+        if cache_dir is not None and r.get("key") is not None:
+            key = _digest({"rec": r["key"], "filter": fname, "q": passes.resolve_q(cfg, None, fname), "cfg": _digest(cfg),
+                           "code": _code_sha(), "starts": [int(x) for x in r["starts"]]})
+            path = cache_dir / f"{sid}_{name.replace('/', '_')}_{key}.json"
+        payloads.append(({"segments": r["segments"], "starts": r["starts"]}, cfg, fname, path))
+    results = dict(zip(tasks, _map(_sens_worker, payloads, cfg, n_jobs)))
+    table = {sid: {v["name"]: results.get((sid, v["name"])) for v in variants} for sid in chosen}
+    matched = sens_matched(table, variants)
+    per_variant = {}
+    for v in variants:
+        n = v["name"]
+        rows = [table[s][n] for s in chosen]
+        per_variant[n] = {"highpass": bool(v["highpass"]), "strict": bool(v["strict"]),
+                          "n_subjects": len(chosen), "n_excluded": int(sum(r is None for r in rows)),
+                          "n_recordings_diverged": int(sum(r is not None and r["recording_diverged"] for r in rows)),
+                          "n_usable": int(sum(r is not None and not r["recording_diverged"] and r["params"] is not None for r in rows)),
+                          "mean_diverged_fraction": float(np.mean([r["diverged_fraction"] for r in rows if r is not None]))
+                          if any(r is not None for r in rows) else None}
+    head, dirty = tuning._git_state(root)
+    doc = {"schema": int(sc["schema_version"]), "split_seed": int(seed), "pilot": bool(pilot), "mechanics_only": bool(pilot),
+           "mode": plan.mode, "filter": fname, "q": passes.resolve_q(cfg, None, fname), "descriptive_only": True,
+           "reference_variant": ref_name, "variants": variants, "n_subjects_wanted": n_want, "subjects": chosen,
+           "n_subjects_stand_in": bool(pilot and len(chosen) < n_want),
+           "skipped_subjects": skipped, "excluded_recordings": [{"subject": s, "variant": n, "reason": r}
+                                                                  for (s, n), r in sorted(excluded.items())],
+           "per_variant": per_variant, "matched_subjects": matched, "n_matched": len(matched),
+           "parameters": {s: {n: (None if table[s][n] is None else table[s][n]["params"]) for n in names} for s in chosen},
+           "summary": sens_summary(table, matched, variants, cfg) if matched else {},
+           "judged_parameters": list(sc["judged_parameters"]), "robust_median_abs_change_max": float(sc["robust_median_abs_change_max"]),
+           "note": "descriptive; matched subjects only; p is not judged (§5.2); the divergence rule is unchanged"}
+    doc["provenance"] = _provenance(cfg, root, seed, {})
+    path = _result_path(cfg, root, seed, pilot, "sensitivity")
+    status = write_c1(path, _clean(doc), force=force)
+    log.info("sensitivity, split seed %s: %s (%s)", seed, status, path)
+    return {"doc": doc, "path": path, "status": status}
