@@ -647,7 +647,7 @@ def phase3_steps(cfg, root, pilot):
 
 def phase4_steps(cfg, root, pilot):
     def figures(force):
-        raise NotBuilt("src/figures.py (PLAN H1) is not built")
+        raise NotBuilt("the phase-4 runner is not built (PLAN H1, reduced scope, IMP-099); figures run through python -m src.figures")
     return [Step("figures", [Path(root) / cfg["paths"]["figures_dir"]], figures)]
 
 

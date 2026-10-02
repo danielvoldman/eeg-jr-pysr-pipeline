@@ -660,6 +660,50 @@ compute:
     MKL_NUM_THREADS: {value: "1", prov: locked, ref: "§16.2"}
     PYTHON_JULIACALL_THREADS: {value: "8", prov: locked, ref: "§16.2"}
 
+# ---------------------------------------------------------------- figures (§19, IMP-099)
+# Owner's H1 settings of 2026-10-02 (IMP-099). The PNG format and 300 DPI are LOCKED by §19; the rest are the owner's
+# stated style values, tagged locked because the owner fixed them. Read only by src/figures.py and tests.
+figures:
+  format: {value: "png", prov: locked, ref: "§19"}
+  dpi: {value: 300, prov: locked, ref: "§19"}
+  dpi_tolerance: {value: 1, prov: locked, ref: "IMP-099", note: "test tolerance on the saved PNG's dpi metadata"}
+  font_family: {value: "DejaVu Sans", prov: locked, ref: "IMP-099"}
+  width_single_in: {value: 3.5, prov: locked, ref: "IMP-099"}
+  width_double_in: {value: 7.0, prov: locked, ref: "IMP-099"}
+  height_single_in: {value: 2.6, prov: locked, ref: "IMP-099"}
+  height_row_double_in: {value: 3.0, prov: locked, ref: "IMP-099", note: "per row of a double-width figure"}
+  font_label_pt: {value: 8, prov: locked, ref: "IMP-099"}
+  font_tick_pt: {value: 7, prov: locked, ref: "IMP-099"}
+  font_min_pt: {value: 7, prov: locked, ref: "IMP-099", note: "minimum for ANY text"}
+  font_panel_pt: {value: 9, prov: locked, ref: "IMP-099", note: "bold panel letters"}
+  line_data_pt: {value: 1.0, prov: locked, ref: "IMP-099"}
+  line_axes_pt: {value: 0.5, prov: locked, ref: "IMP-099"}
+  marker_min_pt: {value: 3, prov: locked, ref: "IMP-099"}
+  marker_pt: {value: 4, prov: locked, ref: "IMP-099", note: "drawn marker size, at least marker_min_pt"}
+  overlap_tol_px: {value: 1, prov: locked, ref: "IMP-099", note: "test tolerance for text overlap"}
+  palette_min_de_cvd: {value: 10, prov: locked, ref: "IMP-099", note: "CIE76 dE between any two palette colours under CVD simulation (tests)"}
+  palette_min_dl_gray: {value: 15, prov: locked, ref: "IMP-099", note: "grayscale dL* between colours, or a distinct marker plus linestyle (tests)"}
+  bar_width: {value: 0.6, prov: placeholder, ref: "IMP-099", note: "layout only"}
+  headroom_fraction: {value: 0.25, prov: placeholder, ref: "IMP-099", note: "layout only: space above the bars for annotations"}
+  colors:
+    bar_dropped: {value: "#D9D9D9", prov: locked, ref: "IMP-099", note: "Okabe-Ito based; checked by tests/test_figures.py"}
+    bar_outside_delta: {value: "#D55E00", prov: locked, ref: "IMP-099"}
+    bar_pending: {value: "#08306B", prov: locked, ref: "IMP-099"}
+    m0: {value: "#000000", prov: locked, ref: "IMP-099"}
+    m1: {value: "#D55E00", prov: locked, ref: "IMP-099"}
+    m2: {value: "#0072B2", prov: locked, ref: "IMP-099"}
+    m3: {value: "#E69F00", prov: locked, ref: "IMP-099"}
+    text: {value: "#000000", prov: locked, ref: "IMP-099"}
+  hatch_pending: {value: "//", prov: locked, ref: "IMP-099"}
+  series_style:
+    m0: {value: {marker: "o", linestyle: "-", hollow: false}, prov: locked, ref: "IMP-099"}
+    m0b: {value: {marker: "o", linestyle: ":", hollow: true}, prov: locked, ref: "IMP-099", note: "M0b: hollow marker, dotted line, same colour as M0"}
+    m1: {value: {marker: "s", linestyle: "--", hollow: false}, prov: locked, ref: "IMP-099"}
+    m2: {value: {marker: "^", linestyle: "-.", hollow: false}, prov: locked, ref: "IMP-099"}
+    m3: {value: {marker: "D", linestyle: "-", hollow: false}, prov: locked, ref: "IMP-099"}
+  footer_pilot: {value: "PILOT: mechanics only, not a result", prov: locked, ref: "IMP-099, §18.1"}
+  footer_low_confidence: {value: "LOW CONFIDENCE (gate.json)", prov: locked, ref: "IMP-099, §18.1"}
+
 # ---------------------------------------------------------------- items the document leaves open
 # Not read by code. Claude Code must ask before implementing any of these (see prov: unset above),
 # then log the answer in DEVIATIONS.md §2 (IMP-nnn) and change the tag to `placeholder`.
