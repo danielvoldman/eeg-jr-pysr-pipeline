@@ -104,20 +104,30 @@ def test_phase_refuses_without_previous_flag(temp_root, phase):
     assert "refused" in log and "not implemented" not in log
 
 
-def test_phase2_starts_with_flag(temp_root):
+def _full_gate(root):
+    g = root / "outputs" / "gate.json"
+    g.parent.mkdir(parents=True, exist_ok=True)
+    g.write_text('{"hard_stop": false, "low_confidence": false}', encoding="utf-8")
+
+
+def test_phase2_starts_with_flag(temp_root, monkeypatch):
     f = _flag(temp_root, 1)
     f.parent.mkdir(parents=True)
     f.write_text("x", encoding="utf-8")
+    _full_gate(temp_root)
+    # Test double: a runner that fails, to show the phase got past the prerequisite and the gate (H0 replaced the stubs).
+    monkeypatch.setitem(main.PHASE_RUNNERS, 2, lambda cfg, root, pilot: False)
     rc = main.main(["--phase", "2"], root=temp_root)
-    assert rc == main.EXIT_FAILED  # got past the gate and ran the stub
+    assert rc == main.EXIT_FAILED
     log = (temp_root / "logs" / "phase2.log").read_text(encoding="utf-8")
-    assert "not implemented" in log
+    assert "did not succeed" in log and "refused" not in log
 
 
-def test_phase1_has_no_predecessor(temp_root):
+def test_phase1_has_no_predecessor(temp_root, monkeypatch):
+    monkeypatch.setitem(main.PHASE_RUNNERS, 1, lambda cfg, root, pilot: False)
     assert main.main(["--phase", "1"], root=temp_root) == main.EXIT_FAILED
     log = (temp_root / "logs" / "phase1.log").read_text(encoding="utf-8")
-    assert "not implemented" in log and "refused" not in log
+    assert "did not succeed" in log and "refused" not in log
 
 
 def test_invalid_phase_rejected(temp_root):
@@ -131,11 +141,14 @@ def test_invalid_phase_rejected(temp_root):
 
 @pytest.mark.parametrize("pilot", [False, True])
 @pytest.mark.parametrize("phase", PHASES)
-def test_stub_never_writes_done_flag(temp_root, phase, pilot):
+def test_failed_runner_never_writes_done_flag(temp_root, monkeypatch, phase, pilot):
     for p in range(1, phase):  # satisfy the prerequisite
         f = _flag(temp_root, p, pilot)
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("x", encoding="utf-8")
+    if phase > 1 and not pilot:
+        _full_gate(temp_root)
+    monkeypatch.setitem(main.PHASE_RUNNERS, phase, lambda cfg, root, pilot: False)
     rc = main.main(["--phase", str(phase)] + (["--pilot"] if pilot else []),
                    root=temp_root)
     assert rc == main.EXIT_FAILED
@@ -155,7 +168,8 @@ def test_flag_written_only_on_runner_success(temp_root, monkeypatch):
 
 # ---- pilot isolation (IMP-002) ----------------------------------------------
 
-def test_pilot_creates_results_pilot_and_pilot_log(temp_root):
+def test_pilot_creates_results_pilot_and_pilot_log(temp_root, monkeypatch):
+    monkeypatch.setitem(main.PHASE_RUNNERS, 1, lambda cfg, root, pilot: False)
     main.main(["--phase", "1", "--pilot"], root=temp_root)
     cfg = load_config(temp_root / "config.yml")
     assert (temp_root / cfg["paths"]["pilot_results_dir"]).is_dir()
@@ -170,7 +184,7 @@ def test_pilot_flags_live_under_results_pilot(temp_root, monkeypatch):
     assert not (temp_root / "outputs" / "phase1.done").exists()
 
 
-def test_pilot_ignores_full_flags_and_full_ignores_pilot_flags(temp_root):
+def test_pilot_ignores_full_flags_and_full_ignores_pilot_flags(temp_root, monkeypatch):
     full = _flag(temp_root, 1, False)
     full.parent.mkdir(parents=True)
     full.write_text("x", encoding="utf-8")
@@ -180,12 +194,14 @@ def test_pilot_ignores_full_flags_and_full_ignores_pilot_flags(temp_root):
     pilot.parent.mkdir(parents=True, exist_ok=True)
     pilot.write_text("x", encoding="utf-8")
     assert main.main(["--phase", "2"], root=temp_root) == main.EXIT_PREREQ
+    monkeypatch.setitem(main.PHASE_RUNNERS, 2, lambda cfg, root, pilot: False)
     assert main.main(["--phase", "2", "--pilot"], root=temp_root) == main.EXIT_FAILED
 
 
 # ---- run-time folders --------------------------------------------------------
 
-def test_runtime_dirs_created_by_main(temp_root):
+def test_runtime_dirs_created_by_main(temp_root, monkeypatch):
+    monkeypatch.setitem(main.PHASE_RUNNERS, 1, lambda cfg, root, pilot: False)    # never reach the real download step
     main.main(["--phase", "1"], root=temp_root)
     for d in ("cache", "outputs", "results", "logs"):
         assert (temp_root / d).is_dir()
@@ -207,8 +223,8 @@ def cli_copy(tmp_path):
     return tmp_path
 
 
-def _run_cli(root, phase):
-    return subprocess.run([sys.executable, str(root / "main.py"), "--phase", str(phase)],
+def _run_cli(root, phase, *extra):
+    return subprocess.run([sys.executable, str(root / "main.py"), "--phase", str(phase), *extra],
                           cwd=root, capture_output=True, text=True)
 
 
@@ -217,7 +233,8 @@ def test_cli_phase3_refused_without_prerequisite(cli_copy):
     assert _run_cli(cli_copy, 3).returncode == main.EXIT_PREREQ
 
 
-def test_cli_phase1_stub_fails_without_flag(cli_copy):
-    """Run as a script, the phase 1 stub exits 1 and writes no phase1.done."""
-    assert _run_cli(cli_copy, 1).returncode == main.EXIT_FAILED
-    assert not _flag(cli_copy, 1).exists()
+def test_cli_phase1_pilot_without_data_fails_without_flag(cli_copy):
+    """Run as a script, the real pilot phase 1 finds no split file in the empty copy, exits 1 and writes no flag (a pilot,
+    so the download step is never reached)."""
+    assert _run_cli(cli_copy, 1, "--pilot").returncode == main.EXIT_FAILED
+    assert not _flag(cli_copy, 1, True).exists()

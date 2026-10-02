@@ -550,7 +550,10 @@ def test_guard_refuses_non_pilot_and_accepts_pilot(rec):
     with pytest.raises(preprocess.DevelopmentGuardError):
         preprocess.load_recording(CFG, edf, root, man, None)
     assert preprocess.load_recording(CFG, edf, root, man, frozenset({SUBJECT})).subject == SUBJECT
-    assert preprocess.load_recording(CFG, edf, root, man, frozenset(), allow_all=True).subject == SUBJECT
+    with pytest.raises(preprocess.DevelopmentGuardError, match="all_subjects_permitted"):
+        preprocess.load_recording(CFG, edf, root, man, frozenset(), allow_all=True)             # IMP-089: needs the scope
+    with preprocess.all_subjects_permitted():
+        assert preprocess.load_recording(CFG, edf, root, man, frozenset(), allow_all=True).subject == SUBJECT
 
 
 def test_load_pilot_ids_reads_the_split_json(tmp_path):
@@ -667,7 +670,8 @@ def test_preprocess_imports_are_restricted_and_never_model():
     path = REPO_ROOT / "src" / "preprocess.py"
     names = _imports(path)
     allowed = {"argparse", "csv", "hashlib", "json", "logging", "math", "sys", "dataclasses", "fractions",
-               "pathlib", "numpy", "scipy.signal", "scipy.ndimage", "src.config", "mne", "pywt"}   # scipy.ndimage, pywt: B5 (IMP-012)
+               "pathlib", "numpy", "scipy.signal", "scipy.ndimage", "src.config", "mne", "pywt",   # scipy.ndimage, pywt: B5 (IMP-012)
+               "contextlib", "psutil", "joblib", "threadpoolctl"}                       # phase-1 pool and scope (H0, IMP-089)
     assert names <= {n.split(".")[0] for n in allowed} | allowed, names
     tree = ast.parse(path.read_text(encoding="utf-8"))
     full = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)} | \

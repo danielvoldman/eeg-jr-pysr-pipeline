@@ -37,6 +37,7 @@ paths:
   summary_file: {value: "results/summary.json", prov: locked, ref: "§18.2"}
   equations_file: {value: "results/equations.tex", prov: locked, ref: "§18.2"}
   exclusions_file: {value: "outputs/exclusions.json", prov: placeholder, ref: "§12, §18.1", note: "IMP-012; written only by phase 1 (later), never by a test; per-variant files get a suffix"}
+  impulse_response_file: {value: "outputs/bandpass_impulse_response.npz", prov: placeholder, ref: "§5.1, §18.1, IMP-089", note: "the band-pass impulse response for both high-pass variants (0.5 and 0.1 Hz); pilot: same name under paths.pilot_results_dir"}
   split_file_pattern: {value: "outputs/split_{seed}.json", prov: locked, ref: "§11.1"}
   phase_flag_pattern: {value: "outputs/phase{n}.done", prov: locked, ref: "§18.1"}
   pilot_phase_flag_pattern: {value: "results/pilot/phase{n}.done", prov: placeholder, ref: "§18.1", note: "IMP-002: §18.1 does not say where pilot flags live; kept apart from outputs/ so a pilot never unlocks a full run"}

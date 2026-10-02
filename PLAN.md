@@ -504,6 +504,12 @@ Note (2026-10-02; IMP-088): done on pilot data (no frozen equation, no verdicts 
 
 ## Stage H: Figures (figures.py)
 
+### [~] H0. Wiring of main.py phases 1 to 4 (approved 2026-10-02; IMP-089)
+Read: §16.5.1, §17, §18, §18.1.
+Done when: the four phase runners replace the stubs; a full phase 2 to 4 refuses a missing or hard-stopped gate and carries low_confidence into the JSON flag; a pilot never stops; every step resumes by its output files with provenance checks and `--force`; the Phase-1 wiring debt of B4 to B6 is closed (5% halt, `write_exclusions`, per-variant files, config hash and manifest line, impulse responses, `allow_all` scope).
+
+Note (2026-10-02): runners, flags, resumability, step plans and the phase-1 pieces are built and tested (tests/test_phases.py, 46 tests; 21 mutation checks). Real pilot run: `--phase 1 --pilot` writes the four per-variant exclusion files (0 of 16 units-check failures, sub-051 ses-t2 excluded for 20.0 s of clean data, as in B6), the impulse responses and a JSON flag with low_confidence true; a second call skips every step; `--phase 2 --pilot` skips the baseline, runs the Q/R NIS report and stops at the unbuilt primary fit (no flag). Phase 3 pilot steps were run directly (no phase 2 flag exists): C2 written with an undetermined verdict, summary rewritten. NOT BUILT, so the box is [~]: the real-data primary fit and frozen-equation driver of phase 2 (separate step), the full G0 driver of phase 1 (Stage K) and src/figures.py of phase 4 (H1).
+
 ### [ ] H1. Nine figures
 Read: §19.
 Done when:

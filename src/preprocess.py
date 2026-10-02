@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import sys
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -211,8 +212,12 @@ def load_pilot_ids(cfg, root):
 
 
 def assert_dev_subject(subject_id, pilot_ids, allow_all=False):
-    """Development runs may only read pilot subjects; only phase 1 passes allow_all=True."""
+    """Development runs may only read pilot subjects. allow_all=True works only inside all_subjects_permitted(), which the
+    full-mode phase runners of main.py enter (IMP-089)."""
     if allow_all:
+        if _PERMIT["depth"] <= 0:
+            raise DevelopmentGuardError(
+                "allow_all=True is only permitted inside preprocess.all_subjects_permitted() (the full-mode phase runners)")
         return
     if pilot_ids is None or subject_id not in pilot_ids:
         raise DevelopmentGuardError(
@@ -992,6 +997,95 @@ def write_exclusions(path, structure, *, variant, config_sha256, manifest_summar
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+
+
+# ---------------------------------------------------------------- phase 1 pieces (H0, IMP-089)
+
+_PERMIT = {"depth": 0}
+
+
+@contextmanager
+def all_subjects_permitted():
+    """The only scope in which allow_all=True works. The full-mode phase runners of main.py enter it; a development script,
+    a pilot run or a test that passes allow_all=True outside it gets a DevelopmentGuardError (IMP-089)."""
+    _PERMIT["depth"] += 1
+    try:
+        yield
+    finally:
+        _PERMIT["depth"] -= 1
+
+
+def recording_files(cfg, root, subjects=None):
+    """The EDF paths under data/ by dataset.eeg_glob, sorted; all of them, or those of the given subject IDs."""
+    data = Path(root) / cfg["paths"]["data_dir"]
+    pattern = cfg["dataset"]["eeg_glob"]
+    if subjects is None:
+        return sorted(data.glob(pattern))
+    return [p for s in sorted(subjects) for p in sorted(data.glob(pattern.replace("sub-*", s, 1)))]
+
+
+def _variant_worker(payload):
+    """Top-level (Windows spawn): B4 + B5 + the §12 decision of ONE recording under one variant; cached on disk. Returns
+    ((subject, session), decision). Each worker pins BLAS to one thread (§16.5.1)."""
+    from threadpoolctl import threadpool_limits
+    cfg, edf, data_root, manifest_path, pilot_ids, allow_all, highpass, strict, cache_root = payload
+    manifest = load_manifest(manifest_path)
+    with threadpool_limits(limits=1):
+        with (all_subjects_permitted() if allow_all else nullcontext()):
+            res = segment_recording(cfg, edf, data_root, manifest, pilot_ids, allow_all=allow_all,
+                                    sensitivity_highpass=highpass, strict=strict, cache_root=cache_root)
+    return (res.meta["subject"], res.meta["session"]), recording_decision(cfg, res.meta, res.meta)
+
+
+def preprocess_variant(cfg, root, variant, subjects, *, allow_all, pilot_ids, n_jobs=None):
+    """Phase 1 for one §5.2 variant ({name, highpass, strict}): every recording of `subjects` (None = all) through B4, B5 and
+    the B6 decision, on the loky pool, cached per recording. Returns the structure of apply_exclusions (the 5% halt
+    decision included); nothing is written here."""
+    import psutil
+    from joblib import Parallel, delayed
+    root = Path(root)
+    files = recording_files(cfg, root, subjects)
+    if not files:
+        raise PreprocessError("no EDF recordings found for the requested subjects")
+    manifest_path = root / cfg["paths"]["manifest_file"]
+    data_root, cache_root = root / cfg["paths"]["data_dir"], root / cfg["paths"]["cache_dir"]
+    payloads = [(cfg, f, data_root, manifest_path, frozenset(pilot_ids), allow_all, bool(variant["highpass"]),
+                 bool(variant["strict"]), cache_root) for f in files]
+    n = max(1, min(int(cfg["compute"]["joblib_n_jobs"] if n_jobs is None else n_jobs), len(psutil.Process().cpu_affinity())))
+    if n <= 1 or len(payloads) <= 1:
+        out = [_variant_worker(p) for p in payloads]
+    else:
+        out = Parallel(n_jobs=n, backend=cfg["compute"]["joblib_backend"])(delayed(_variant_worker)(p) for p in payloads)
+    return apply_exclusions(cfg, dict(out))
+
+
+def exclusions_path(cfg, root, variant_name, pilot):
+    """outputs/exclusions.json for the primary variant, outputs/exclusions_<variant>.json for the others (the config note on
+    paths.exclusions_file: per-variant files get a suffix); a pilot writes the same names under paths.pilot_results_dir."""
+    p = Path(cfg["paths"]["exclusions_file"])
+    ref = cfg["statistics"]["sensitivity"]["reference_variant"]
+    name = p.name if variant_name == ref else f"{p.stem}_{variant_name}{p.suffix}"
+    base = Path(root) / (cfg["paths"]["pilot_results_dir"] if pilot else p.parent)
+    return base / name
+
+
+def impulse_response_path(cfg, root, pilot):
+    p = Path(cfg["paths"]["impulse_response_file"])
+    return Path(root) / (Path(cfg["paths"]["pilot_results_dir"]) / p.name if pilot else p)
+
+
+def save_impulse_responses(cfg, path):
+    """The impulse response of bandpass() for both high-pass variants (0.5 and 0.1 Hz) at the native rate, §5.1 disclosure."""
+    fs = float(cfg["dataset"]["native_fs_hz"])
+    hp_main, hp_sens = cfg["preprocessing"]["bandpass"]["highpass_hz"], cfg["preprocessing"]["sensitivity_highpass_hz"]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, fs_hz=np.float64(fs), highpass_hz=np.array([hp_main, hp_sens], dtype=np.float64),
+             response_primary=bandpass_impulse_response(cfg, fs, hp_main),
+             response_sensitivity=bandpass_impulse_response(cfg, fs, hp_sens),
+             description=np.array("impulse of bandpass() at the native rate, odd length, impulse at index len // 2 (section 5.1)"))
+    return path
 
 
 # ---------------------------------------------------------------- edge-transient report (development)

@@ -1671,9 +1671,15 @@ def format_comparison(report):
     return lines
 
 
-def comparison_paths(cfg, root):
+def comparison_paths(cfg, root, options=None):
+    """(comparison file, timing file) of the pilot driver. A run restricted to some of the options (phase 1 --pilot, IMP-089)
+    gets the option names as a suffix, so the all-option DEV-005 evidence files are never overwritten."""
     d = Path(root) / cfg["paths"]["pilot_results_dir"]
-    return d / cfg["g0"]["pilot"]["comparison_file"], d / cfg["g0"]["pilot"]["timing_file"]
+    paths = d / cfg["g0"]["pilot"]["comparison_file"], d / cfg["g0"]["pilot"]["timing_file"]
+    if options is not None and list(options) != list(cfg["g0"]["filter_options"]):
+        suffix = "_" + "_".join(options)
+        paths = tuple(q.with_name(q.stem + suffix + q.suffix) for q in paths)
+    return paths
 
 
 def write_pilot_json(cfg, root, doc, path):
@@ -1695,20 +1701,26 @@ def pool_size(cfg, n_jobs=None):
     return max(1, min(int(n), len(psutil.Process().cpu_affinity())))
 
 
-def run_pilot(cfg, root, n_jobs=None, estimate_only=False):
+def run_pilot(cfg, root, n_jobs=None, estimate_only=False, options=None):
     """E5: the UKF-only stage of the DEV-005 comparison on the pilot set (no PySR, never outputs/gate.json). Order:
     generate every series once, time one series of each kind per option, stop when the conservative all-options estimate
     exceeds g0.pilot.max_estimated_hours, then per option tune G0's own q on the tuning set and evaluate the 100 series
     (20 positive, 20 Null A, 20 Null B, 20 gate positive, 20 gate artifact-only null) on n_jobs workers. Writes
-    results/pilot/gate_<option>.json per option and the comparison file; returns the report."""
+    results/pilot/gate_<option>.json per option and the comparison file; returns the report. `options` (phase 1 --pilot: filter
+    A only, IMP-089) restricts the run to those options; the comparison and timing files then get the option names as a
+    suffix, so the three-option DEV-005 evidence files are never overwritten."""
     import time
     from joblib import Parallel, delayed
     from src import tuning
     root = Path(root)
-    options = gate_filters(cfg, True)
+    all_options = gate_filters(cfg, True)
+    options = all_options if options is None else list(options)
+    unknown = [o for o in options if o not in all_options]
+    if unknown:
+        raise GateError(f"not G0 filter options: {unknown}")
     n_workers = pool_size(cfg, n_jobs)
     limit_h = cfg["g0"]["pilot"]["max_estimated_hours"]
-    comparison_path, timing_path = comparison_paths(cfg, root)
+    comparison_path, timing_path = comparison_paths(cfg, root, options)
     t0 = time.perf_counter()
     table, grid = pilot_inputs(cfg, root)
     sets = pilot_series_sets(cfg, grid, table)

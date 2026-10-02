@@ -31,6 +31,8 @@ import json
 import logging
 import os
 import sys
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml  # noqa: F401  (allowed before the env bootstrap)
@@ -67,11 +69,12 @@ def parse_args(argv=None):
     parser.add_argument("--dry-run", action="store_true",
                         help="with --make-split: report, write nothing")
     parser.add_argument("--force", action="store_true",
-                        help="with --make-split: overwrite differing split files "
-                             "(must be logged in DEVIATIONS.md section 1)")
+                        help="with --make-split: overwrite differing split files (must be logged in DEVIATIONS.md "
+                             "section 1); with --phase: recompute every step instead of reusing its output (a full run "
+                             "must log replaced never-redrawn outputs in DEVIATIONS.md)")
     args = parser.parse_args(argv)
-    if not args.make_split and (args.dry_run or args.force):
-        parser.error("--dry-run and --force need --make-split")
+    if not args.make_split and args.dry_run:
+        parser.error("--dry-run needs --make-split")
     if args.make_split and args.pilot:
         parser.error("--pilot cannot be combined with --make-split")
     return args
@@ -382,30 +385,297 @@ def check_prerequisite(cfg, root, phase, pilot):
     return None if prev.is_file() else prev
 
 
-def _make_stub(phase):
+# ---------------------------------------------------------------- gate state and phase flags (H0, IMP-089)
+
+def _sha256_file(path):
+    path = Path(path)
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def _git_head(root):
+    import subprocess
+    try:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def gate_state(cfg, root, pilot):
+    """The gate file of the mode (outputs/gate.json, or results/pilot/gate_<g0.filter>.json for a pilot): whether it exists
+    and its hard_stop and low_confidence flags (None when unknown)."""
+    from src import passes, synthetic_gate
+    path = synthetic_gate.gate_path(cfg, root, pilot, passes.resolve_filter(cfg))
+    state = {"path": path, "exists": path.is_file(), "hard_stop": None, "low_confidence": None}
+    if state["exists"]:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        state["hard_stop"] = None if doc.get("hard_stop") is None else bool(doc["hard_stop"])
+        state["low_confidence"] = None if doc.get("low_confidence") is None else bool(doc["low_confidence"])
+    return state
+
+
+def check_phase_gate(cfg, root, phase, pilot):
+    """(refusal reason or None, low_confidence). Phases 2 to 4 of a full run need a gate file without hard_stop (§18.1: a
+    hard stop writes no phase1.done, and the gate is read here as a second line); a pilot never stops. low_confidence is
+    carried forward from the gate into every later flag."""
+    if phase == 1:
+        return None, None
+    g = gate_state(cfg, root, pilot)
+    if not pilot:
+        if not g["exists"]:
+            return f"gate file {g['path']} not found (CLAUDE.md rule 6)", None
+        if g["hard_stop"] is not False:
+            return f"gate file {g['path']} records a hard stop (or none was recorded)", g["low_confidence"]
+    return None, g["low_confidence"]
+
+
+def read_flag(path):
+    """The phase flag as a dict: the JSON of this version, {"legacy": True} for an older timestamp-only flag, None if absent."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return {"legacy": True, "text": text.strip()}
+    return doc if isinstance(doc, dict) else {"legacy": True, "text": text.strip()}
+
+
+def write_flag(cfg, root, phase, pilot, *, low_confidence, wall_seconds, steps):
+    """outputs/phase<N>.done (pilot: results/pilot/phase<N>.done) as JSON: timestamp, commit, config hash, low_confidence,
+    wall seconds and the per-step record (answer 10 of 2026-10-02)."""
+    flag = flag_path(cfg, root, phase, pilot)
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    doc = {"phase": int(phase), "pilot": bool(pilot), "mechanics_only": bool(pilot),
+           "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(), "git_commit": _git_head(root),
+           "config_sha256": _sha256_file(Path(root) / "config.yml"), "low_confidence": low_confidence,
+           "wall_seconds": float(wall_seconds), "steps": steps}
+    flag.write_text(json.dumps(doc, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return flag
+
+
+# ---------------------------------------------------------------- steps, resumability (H0, IMP-089)
+
+class PhaseError(RuntimeError):
+    """A phase step cannot continue; the phase fails and writes no flag."""
+
+
+class StepRefused(PhaseError):
+    """An existing output cannot be reused and would have to be replaced: needs --force."""
+
+
+class NotBuilt(PhaseError):
+    """The step belongs to a stage that has not been built yet (named in the message)."""
+
+
+RUN_STATE = {"force": False, "steps": {}}
+
+
+@dataclass
+class Step:
+    name: str
+    outputs: list                  # the files whose existence marks the step as done
+    run: object                    # run(force: bool) -> None
+    always: bool = False           # a derived step (the summary): rerun on every call
+
+
+def stale_reason(path, cfg, root):
+    """(reason or None, drift list) for one existing output. JSON outputs with a provenance block must still match the
+    split file they were made with, and the frozen equation (a file made without one, or with another, is stale once a
+    different one exists). Config and code hash differences are drift: logged, never a refusal (a rerun is guarded by the
+    drivers' write-once rule anyway)."""
+    path = Path(path)
+    if path.suffix != ".json":
+        return None, []
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return f"{path.name} is not valid JSON", []
+    prov = doc.get("provenance") if isinstance(doc, dict) else None
+    if not isinstance(prov, dict):
+        return None, []
+    seed, drift = doc.get("split_seed"), []
+    if seed is not None and "split_file_sha256" in prov:
+        if prov["split_file_sha256"] != _sha256_file(split_path(cfg, root, seed)):
+            return f"{path.name} was made with a different split file (the split is never redrawn, §11.1)", []
+    if seed is not None and "frozen_equation_sha256" in prov:
+        from src import regression
+        fp = regression.frozen_equation_path(cfg, root, seed, bool(doc.get("pilot")))
+        if prov["frozen_equation_sha256"] != _sha256_file(fp):
+            return f"{path.name} was made with another (or no) frozen equation than the one on disk", []
+    if prov.get("config_yml_sha256") not in (None, _sha256_file(Path(root) / "config.yml")):
+        drift.append("config.yml changed since the output was written")
+    return None, drift
+
+
+def run_steps(steps, cfg, root, pilot, force):
+    """Run the steps in order: an existing, reusable output is skipped (resumability), a stale one refuses without --force,
+    a missing one runs. The per-step record goes to RUN_STATE for the phase flag."""
+    import time
+    log = logging.getLogger(LOGGER_NAME)
+    from src import preprocess
+    with (nullcontext() if pilot else preprocess.all_subjects_permitted()):
+        for st in steps:
+            t0 = time.monotonic()
+            existing = bool(st.outputs) and all(Path(p).is_file() for p in st.outputs)
+            if existing and not force and not st.always:
+                drift = []
+                for p in st.outputs:
+                    reason, d = stale_reason(p, cfg, root)
+                    if reason:
+                        raise StepRefused(f"step {st.name}: {reason}; re-run with --force "
+                                          f"(a deviation entry for outputs that are never redrawn)")
+                    drift += d
+                for d in sorted(set(drift)):
+                    log.warning("step %s: %s (the output is reused; --force recomputes it)", st.name, d)
+                RUN_STATE["steps"][st.name] = {"status": "skipped", "seconds": 0.0, "drift": sorted(set(drift))}
+                log.info("step %s: up to date, skipped", st.name)
+                continue
+            log.info("step %s: running%s", st.name, " (--force)" if force and existing else "")
+            st.run(force)
+            RUN_STATE["steps"][st.name] = {"status": "ran", "seconds": time.monotonic() - t0, "drift": []}
+
+
+def _seeds(cfg, pilot):
+    sp = cfg["split"]
+    return [sp["primary_seed"]] if pilot else [sp["primary_seed"]] + list(sp["extra_seeds"])
+
+
+def phase1_steps(cfg, root, pilot):
+    from src import preprocess, synthetic_gate
+    root = Path(root)
+    ids = sorted(preprocess.load_pilot_ids(cfg, root)) if pilot else None
+    pilot_ids = preprocess.load_pilot_ids(cfg, root) if pilot else frozenset()
+    summary = read_manifest_summary(cfg, root)
+    steps = []
+    if not pilot:
+        def download_step(force):
+            import download
+            download.run_download(cfg, root, logging.getLogger(LOGGER_NAME))
+        steps.append(Step("download", [root / cfg["paths"]["manifest_file"]], download_step))
+    variants = cfg["statistics"]["sensitivity"]["variants"]
+
+    def variant_step(variant):
+        path = preprocess.exclusions_path(cfg, root, variant["name"], pilot)
+
+        def run(force):
+            structure = preprocess.preprocess_variant(cfg, root, variant, ids, allow_all=not pilot, pilot_ids=pilot_ids)
+            preprocess.write_exclusions(path, structure, variant=variant["name"],
+                                        config_sha256=_sha256_file(root / "config.yml"), manifest_summary=summary)
+            h = structure["units_check_halt"]
+            logging.getLogger(LOGGER_NAME).info("preprocess %s: units check failed %d of %d recordings (%.3f)",
+                                                variant["name"], h["n_failed"], h["n_total"], h["fraction"])
+            if h["halt"]:
+                raise PhaseError(f"variant {variant['name']}: units-check halt, {h['n_failed']} of {h['n_total']} recordings "
+                                 f"failed (more than the §4.2 limit); {path.name} written, no phase flag")
+        return Step(f"preprocess:{variant['name']}", [path], run)
+
+    steps += [variant_step(v) for v in variants]
+    ir = preprocess.impulse_response_path(cfg, root, pilot)
+    steps.append(Step("impulse_response", [ir], lambda force: preprocess.save_impulse_responses(cfg, ir)))
+    from src import passes
+    if pilot:
+        fname = passes.resolve_filter(cfg)
+        gate = synthetic_gate.gate_path(cfg, root, True, fname)
+        steps.append(Step("g0_pilot", [gate], lambda force: synthetic_gate.run_pilot(cfg, root, options=[fname])))
+    else:
+        def g0_full(force):
+            raise NotBuilt("the full G0 driver (PLAN Stage K, phase 1) is not built; gate.json cannot be written")
+        steps.append(Step("g0", [root / cfg["paths"]["gate_file"]], g0_full))
+    return steps
+
+
+def phase2_steps(cfg, root, pilot):
+    from src import baseline, tuning
+    root = Path(root)
+    steps = []
+    for s in _seeds(cfg, pilot):
+        paths = list(baseline.output_paths(cfg, root, s, pilot))
+        steps.append(Step(f"baseline:{s}", paths, lambda force, s=s: baseline.run_baseline(cfg, root, s, pilot=pilot, force=force)))
+    s0 = cfg["split"]["primary_seed"]
+    steps.append(Step(f"qr_report:{s0}", [tuning.qr_path(cfg, root, s0, pilot)],
+                      lambda force: tuning.run_real(cfg, root, s0, pilot=pilot, force=force)))
+    from src import regression
+
+    def primary_fit(force):
+        raise NotBuilt("the real-data primary PySR fit and the frozen-equation write (the phase 2 PySR driver) are not built")
+    steps.append(Step("primary_fit", [regression.frozen_equation_path(cfg, root, s, pilot) for s in _seeds(cfg, pilot)],
+                      primary_fit))
+    return steps
+
+
+def phase3_steps(cfg, root, pilot):
+    from src import robustness as rb
+    root = Path(root)
+    seeds, s0 = _seeds(cfg, pilot), cfg["split"]["primary_seed"]
+    conf = not pilot
+    steps = [Step(f"c1:{s}", [rb.output_path(cfg, root, s, pilot)],
+                  lambda force, s=s: rb.run_c1(cfg, root, s, pilot=pilot, confirmatory=conf, force=force)) for s in seeds]
+    steps += [
+        Step("c2", [rb._result_path(cfg, root, s0, pilot, "c2")], lambda force: rb.run_c2(cfg, root, pilot=pilot, confirmatory=conf, force=force)),
+        Step("c3", [rb.c3_output_path(cfg, root, s0, pilot)], lambda force: rb.run_c3(cfg, root, s0, pilot=pilot, confirmatory=conf, force=force)),
+        Step("c4", [rb._result_path(cfg, root, s0, pilot, "c4")], lambda force: rb.run_c4(cfg, root, s0, pilot=pilot, confirmatory=conf, force=force)),
+        Step("diagnostics", [rb.diagnostics_output_path(cfg, root, s0, pilot)],
+             lambda force: rb.run_diagnostics(cfg, root, s0, pilot=pilot, confirmatory=conf, force=force)),
+        Step("sensitivity", [rb._result_path(cfg, root, s0, pilot, "sensitivity")],
+             lambda force: rb.run_sensitivity(cfg, root, s0, pilot=pilot, confirmatory=conf, force=force))]
+
+    def summary(force):
+        secs = {k: v["seconds"] for k, v in RUN_STATE["steps"].items()}
+        rb.run_summary(cfg, root, s0, pilot=pilot, timings={"phase3": float(sum(secs.values())), "phase3_steps": secs})
+    steps.append(Step("summary", list(rb.summary_paths(cfg, root, pilot)), summary, always=True))
+    return steps
+
+
+def phase4_steps(cfg, root, pilot):
+    def figures(force):
+        raise NotBuilt("src/figures.py (PLAN H1) is not built")
+    return [Step("figures", [Path(root) / cfg["paths"]["figures_dir"]], figures)]
+
+
+PHASE_STEPS = {1: phase1_steps, 2: phase2_steps, 3: phase3_steps, 4: phase4_steps}
+
+
+def _make_runner(phase):
     def runner(cfg, root, pilot):
-        logging.getLogger(LOGGER_NAME).error(
-            "phase %d: not implemented", phase)
-        return False
+        log = logging.getLogger(LOGGER_NAME)
+        try:
+            run_steps(PHASE_STEPS[phase](cfg, root, pilot), cfg, root, pilot, RUN_STATE["force"])
+        except PhaseError as exc:
+            log.error("phase %d: %s: %s", phase, type(exc).__name__, exc)
+            return False
+        except Exception as exc:                                                       # noqa: BLE001
+            log.exception("phase %d: step failed: %s", phase, exc)
+            return False
+        return True
     return runner
 
 
-# Real runners replace these stubs as their scripts are built. A runner returns
-# True only on success; main() writes the .done flag on that basis alone.
-PHASE_RUNNERS = {n: _make_stub(n) for n in (1, 2, 3, 4)}
+# A runner returns True only on success; run_phase() writes the .done flag on that basis alone.
+PHASE_RUNNERS = {n: _make_runner(n) for n in (1, 2, 3, 4)}
 
 
-def run_phase(cfg, root, phase, pilot):
+def run_phase(cfg, root, phase, pilot, force=False):
+    import time
     logger = logging.getLogger(LOGGER_NAME)
-    logger.info("phase %d start (pilot=%s)", phase, pilot)
+    logger.info("phase %d start (pilot=%s, force=%s)", phase, pilot, force)
+    if force and not pilot:
+        logger.warning("--force on a full run: any output replaced that is never redrawn (split, frozen equation, "
+                       "confirmatory results) must be logged in DEVIATIONS.md")
+    RUN_STATE.update(force=bool(force), steps={})
+    t0 = time.monotonic()
     if PHASE_RUNNERS[phase](cfg, root, pilot) is not True:
         logger.error("phase %d did not succeed; no flag written", phase)
         return EXIT_FAILED
-    flag = flag_path(cfg, root, phase, pilot)
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    flag.write_text(f"{stamp}\n", encoding="utf-8")
-    logger.info("phase %d done; flag %s", phase, flag)
+    low = None
+    try:
+        low = gate_state(cfg, root, pilot)["low_confidence"]
+    except Exception:                                                                  # noqa: BLE001
+        pass                                                                           # no gate file: unknown, recorded as null
+    flag = write_flag(cfg, root, phase, pilot, low_confidence=low, wall_seconds=time.monotonic() - t0,
+                      steps=dict(RUN_STATE["steps"]))
+    logger.info("phase %d done; flag %s (low_confidence %s)", phase, flag, low)
     return EXIT_OK
 
 
@@ -428,7 +698,11 @@ def main(argv=None, root=None):
         logger.error("phase %d refused: required flag %s not found",
                      args.phase, missing)
         return EXIT_PREREQ
-    return run_phase(cfg, root, args.phase, args.pilot)
+    reason, _low = check_phase_gate(cfg, root, args.phase, args.pilot)
+    if reason is not None:
+        logger.error("phase %d refused: %s", args.phase, reason)
+        return EXIT_PREREQ
+    return run_phase(cfg, root, args.phase, args.pilot, force=args.force)
 
 
 if __name__ == "__main__":
