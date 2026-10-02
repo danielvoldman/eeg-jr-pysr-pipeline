@@ -537,6 +537,14 @@ baseline:
 statistics:
   bootstrap_B: {value: 10000, prov: placeholder, ref: "§14", note: "percentile; pre-drawn index matrix"}
   bootstrap_B_pilot: {value: 100, prov: locked, ref: "§17"}
+  bootstrap_seed: {value: 42, prov: placeholder, ref: "§14, IMP-078", note: "decided 2026-10-01 (Daniel Voldman); one index matrix per (split seed, number of clusters) from default_rng([bootstrap_seed, split seed, n]), shared by every comparison of that analysis"}
+  c1:
+    output_pattern: {value: "c1_{seed}.json", prov: placeholder, ref: "§18.1, IMP-078", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
+    cache_subdir: {value: "c1_scores", prov: placeholder, ref: "§18.1, IMP-078", note: "per-subject per-variant forward-filter errors under paths.cache_dir"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-078"}
+    m3_only_divergence_limit: {value: 0.05, prov: locked, ref: "§12", note: "above this share of test recordings, M3-only divergences go into Limitations"}
+    m3_loss_rule: {value: "worst_of_M0_M1_M2", prov: placeholder, ref: "§12, IMP-078", note: "decided 2026-10-01 (Daniel Voldman): a recording where M3 diverges but M2 does not keeps M3's subject error := the worst of that subject's M0, M1, M2 errors"}
+    p_value_rule: {value: "two_sided_percentile", prov: placeholder, ref: "§15.2, IMP-078", note: "p = min(1, 2 min((1 + #{d* <= 0}) / (B + 1), (1 + #{d* >= 0}) / (B + 1)))"}
   bootstrap_unit: {value: "subject (cluster bootstrap when t1 and t2 appear together)", prov: locked, ref: "§11.4"}
   ci_level: {value: 0.95, prov: locked, ref: "§15.1"}
   icc_form: {value: "ICC(3,1) consistency", prov: locked, ref: "§11.3"}

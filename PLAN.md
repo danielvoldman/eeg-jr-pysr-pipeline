@@ -432,7 +432,7 @@ Done when:
 
 Note (2026-10-01): done. state_space (ResidualHook, make_potential_buffer, drift/predict residual argument), src/ukf_resid.py (NumPy extended forward filter with the residual; the Numba files are untouched), passes.run_pass1(residual=..., forward_only only), regression (FrozenResidual, FrozenEquation, build/write/load, frozen_equation_path), config pysr.frozen_equation.*. tests/test_residual_hook.py (24 tests), 8 mutation checks. Nothing writes a frozen-equation file yet (the E5 PySR stage with filter A has not run).
 
-### [ ] G1. C1 scoring
+### [x] G1. C1 scoring
 Read: §10.2, §12, §13, §15.
 Done when:
 - M1–M3 are scored with a continuous forward filter, excluding burn-in.
@@ -440,12 +440,16 @@ Done when:
 - Divergence counts are reported per variant.
 - The sensitivity analysis counts M3-only divergences as M3 losses.
 
+Note (2026-10-01): done on pilot subjects only. src/robustness.py (guard, forward-filter scoring with a per-subject cache, matched sets, M3 loss, divergence report, pre-drawn index matrix, percentile CIs and p, holm(p, m), verdict, writer), config statistics.bootstrap_seed and statistics.c1.*, IMP-078. M3 runs on the NumPy filter of G0.5 (about 94 s for a 230-s recording, against about 4 s for M2 on Numba). No frozen equation exists yet, so the pilot file has M3 absent and no verdict. The bootstrap, CIs, p-values and Holm function of G2 were built here (below). tests/test_robustness.py (37 tests), 20 mutation checks. Pilot output: results/pilot/c1_42.json (mechanics only, 4 subjects).
+
 ### [ ] G2. Bootstrap and Holm correction
 Read: §11.4, §14, §15.2.
 Done when:
 - There are 10,000 subject resamples from a pre-drawn index matrix, vectorized.
 - Resampling is clustered when t1 and t2 appear together.
 - The Holm family is the four bullets of §15.2.
+
+Note (2026-10-01): partly done inside G1. Done: 10,000 resamples (pilot 100) from a pre-drawn index matrix, vectorized (robustness.draw_index_matrix, resample_means, paired_bootstrap); the cluster argument (cluster labels, clustered draw) exists and is unit-tested with hand cases, but nothing uses it yet (C1 is t1 only; C3 will); holm(p, m) is implemented and tested. NOT done, so the box stays open: the Holm family itself (the four §15.2 bullets, one of which holds two tests; the other members come from G3 to G5) and the adjusted values; the C1 file reports raw p only, holm_status 'partial_family'.
 
 ### [ ] G3. C2 aggregation
 Read: §15.
