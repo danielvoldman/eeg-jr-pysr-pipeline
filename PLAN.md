@@ -442,7 +442,7 @@ Done when:
 
 Note (2026-10-01): done on pilot subjects only. src/robustness.py (guard, forward-filter scoring with a per-subject cache, matched sets, M3 loss, divergence report, pre-drawn index matrix, percentile CIs and p, holm(p, m), verdict, writer), config statistics.bootstrap_seed and statistics.c1.*, IMP-078. M3 runs on the NumPy filter of G0.5 (about 94 s for a 230-s recording, against about 4 s for M2 on Numba). No frozen equation exists yet, so the pilot file has M3 absent and no verdict. The bootstrap, CIs, p-values and Holm function of G2 were built here (below). tests/test_robustness.py (37 tests), 20 mutation checks. Pilot output: results/pilot/c1_42.json (mechanics only, 4 subjects).
 
-### [ ] G2. Bootstrap and Holm correction
+### [x] G2. Bootstrap and Holm correction
 Read: §11.4, §14, §15.2.
 Done when:
 - There are 10,000 subject resamples from a pre-drawn index matrix, vectorized.
@@ -450,6 +450,8 @@ Done when:
 - The Holm family is the four bullets of §15.2.
 
 Note (2026-10-01): partly done inside G1. Done: 10,000 resamples (pilot 100) from a pre-drawn index matrix, vectorized (robustness.draw_index_matrix, resample_means, paired_bootstrap); the cluster argument (cluster labels, clustered draw) exists and is unit-tested with hand cases, but nothing uses it yet (C1 is t1 only; C3 will); holm(p, m) is implemented and tested. NOT done, so the box stays open: the Holm family itself (the four §15.2 bullets, one of which holds two tests; the other members come from G3 to G5) and the adjusted values; the C1 file reports raw p only, holm_status 'partial_family'.
+
+Note (2026-10-02, G8; IMP-088): closed. The adjustment (11 members, or 8 when C4 is not attempted, IMP-084) is implemented in robustness.holm_from_files and run once by run_summary; box ticked because the machinery is complete and tested, the real adjusted values come with the confirmatory run (the members of G3 to G5 have no p before it).
 
 Note (2026-10-01, G2 stage; IMP-080): the Holm FAMILY is now defined: 11 members (2 + 3 + 2 + 4, option c, departs from the four-bullets wording of section 14), registry robustness.holm_members, statistics.holm_family_size = 11, and robustness.holm_report refuses to give any adjusted value until all 11 raw p exist (status partial_family). Still NOT done, so the box stays open: the members of G3 (c1_seed:43 to 46) and G5 (freerun:2s, 5s, 10s) do not exist yet, hence no adjusted value; the adjustment runs once in G8. The cluster bootstrap is used by C3 (G4 below) through whole-pair resampling of the pre-drawn matrix.
 
@@ -492,9 +494,11 @@ Done when the M2 UKF has been run on 20 training subjects under each of the 4 pr
 
 Note (2026-10-01; IMP-087): robustness.variant_loader, resolve_sensitivity_subjects, sensitivity_recording, sens_matched, sens_summary, run_sensitivity; the 4 variants are statistics.sensitivity.variants (locked); descriptive only (median absolute relative change against hp0.5_default, 'robust' at 0.15, Spearman unthresholded, p excluded, matched subjects only). tests/test_sensitivity.py (14 tests), 14 mutation checks. Pilot real data (12 subjects stand in for 20, 95 s on 4 workers for 48 recordings): recording-level divergence 6 of 12 at 0.5 Hz (default and strict alike) and 9 of 12 at 0.1 Hz, so only 3 subjects (sub-056, 063, 082) are matched; strict rejection changed nothing for them; against the reference the 0.1 Hz variant moves the E/I terms by a median 7 and 4 percent (robust) and the gains by 19 and 62 percent (not robust), on 3 subjects only. NOT done, so the box is [~]: the 20-subject run on the Q/R draw needs the gate, which does not exist yet.
 
-### [ ] G8. summary.json and equations.tex
+### [x] G8. summary.json and equations.tex
 Read: §18.2.
 Done when both files are written, including when the residual is absent or `low_confidence` is set.
+
+Note (2026-10-02; IMP-088): done on pilot data (no frozen equation, no verdicts exist yet, so every real input is absent and the files say so). src/robustness.py G8 block (summary_paths, summary_inputs, holm_from_files, residual_forms, build_summary, build_equations_tex, run_summary), config statistics.summary.*. summary.json holds the gate block, the residual block (absent / no_term / term with sympy, LaTeX, signatures, sha256), the C1 to C4 blocks, the Holm report, the estimated gains, compute time and input hashes; equations.tex is a standalone amsmath fragment with the underbraced residual. The Holm adjustment runs here (11 members, or 8 when the c4 file's status is not 'attempted'); an incomplete family gets no adjusted value and a pilot never gets one. tests/test_summary.py (26 tests), 10 mutation checks. This closes the Holm half of G2; the real adjusted values exist only after the confirmatory run.
 
 ---
 

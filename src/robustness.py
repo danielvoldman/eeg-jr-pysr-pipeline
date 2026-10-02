@@ -1832,3 +1832,263 @@ def run_sensitivity(cfg, root, seed, *, pilot, confirmatory=False, loader=None, 
     status = write_c1(path, _clean(doc), force=force)
     log.info("sensitivity, split seed %s: %s (%s)", seed, status, path)
     return {"doc": doc, "path": path, "status": status}
+
+
+# ==== G8: summary.json, equations.tex and the Holm adjustment (§18.2; IMP-088) =====================================
+
+def summary_paths(cfg, root, pilot):
+    """(summary.json, equations.tex) of a full run (paths.summary_file, paths.equations_file) or of a pilot (same file
+    names under paths.pilot_results_dir)."""
+    root = Path(root)
+    out = []
+    for key in ("summary_file", "equations_file"):
+        p = Path(cfg["paths"][key])
+        out.append(root / cfg["paths"]["pilot_results_dir"] / p.name if pilot else root / p)
+    return tuple(out)
+
+
+def _read_json(path):
+    path = Path(path)
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def summary_inputs(cfg, root, seed, pilot):
+    """Every file the summary reads: {name: path}. Nothing is recomputed; a missing file is reported, never faked."""
+    from src import regression, synthetic_gate
+    root = Path(root)
+    paths = {"gate": synthetic_gate.gate_path(cfg, root, pilot, passes.resolve_filter(cfg)),
+             "frozen_equation": regression.frozen_equation_path(cfg, root, seed, pilot),
+             "c1": output_path(cfg, root, seed, pilot), "c2": _result_path(cfg, root, seed, pilot, "c2"),
+             "c3": c3_output_path(cfg, root, seed, pilot), "c4": _result_path(cfg, root, seed, pilot, "c4"),
+             "diagnostics": diagnostics_output_path(cfg, root, seed, pilot),
+             "sensitivity": _result_path(cfg, root, seed, pilot, "sensitivity")}
+    for s in cfg["split"]["extra_seeds"]:
+        paths[f"c1_{s}"] = output_path(cfg, root, s, pilot)
+    return paths
+
+
+def holm_from_files(cfg, c1, c2, c3, c4, pilot):
+    """The Holm report of the family of IMP-080 / IMP-084 from the raw p of the result files. The family has 8 members
+    when C4 was not attempted (status other than 'attempted') and 11 otherwise. A pilot never gets an adjusted value
+    (mechanics only), even if every member had a p."""
+    c4_attempted = bool(c4 is not None and c4.get("status") == "attempted")
+    raw = {}
+    if c1 is not None:
+        raw.update({f"c1_step:{k}": v for k, v in c1.get("holm", {}).get("raw_p", {}).items()})
+    for doc in (c2, c3, c4):
+        if doc is not None:
+            raw.update(doc.get("holm_raw_p", {}))
+    if not c4_attempted:
+        raw = {k: v for k, v in raw.items() if not k.startswith("freerun:")}
+    rep = holm_report(cfg, raw, c4_attempted)
+    rep["c4_attempted"] = c4_attempted
+    if pilot:
+        for r in rep["members"]:
+            r["adjusted_p"] = None
+        if rep["status"] == "complete":
+            rep["status"] = "pilot_no_adjustment"
+        rep["note"] = "a pilot run reports no adjusted value (mechanics only)"
+    return rep
+
+
+def _latex_symbols():
+    from src import regression
+    names = {n: (r"\tilde{u}_{\mathrm{%s}}" if n.startswith("u_") else r"\tilde{S}_{\mathrm{%s}}") % n[2:]
+             for n in regression.INPUT_NAMES}
+    for (a, b), pn in zip(regression.PRODUCT_PAIRS, regression.PRODUCT_NAMES):
+        names[pn] = names[regression.INPUT_NAMES[a]] + names[regression.INPUT_NAMES[b]]
+    return names
+
+
+def residual_forms(frozen_doc):
+    """(sympy text, latex text) of the frozen residual function f, built with sympy from the stored equation text. PySR is
+    never imported here; PySR's own .sympy() and .latex() are sympy underneath (IMP-088)."""
+    import sympy
+    from src import regression
+    expr = regression.parse_equation(frozen_doc["equation"])
+    sym = {n: sympy.Symbol(n) for n in regression.VARIABLE_NAMES}
+    return str(expr), sympy.latex(expr, symbol_names={sym[n]: s for n, s in _latex_symbols().items()})
+
+
+def _residual_block(frozen, low_confidence, pilot):
+    if frozen is None:
+        return {"status": "absent", "reason": "no frozen equation exists (the primary PySR fit has not been run)",
+                "low_confidence": low_confidence, "mechanics_only": bool(pilot)}
+    doc = frozen.doc
+    base = {"frozen_equation_sha256": frozen.sha256, "signatures": list(doc.get("signatures", [])),
+            "complexity": doc.get("complexity"), "val_loss": doc.get("val_loss"), "min_val_loss": doc.get("min_val_loss"),
+            "zscore": doc["zscore"], "fit_subjects": list(doc["fit_subjects"]), "low_confidence": low_confidence,
+            "mechanics_only": bool(pilot)}
+    if frozen.no_term:
+        return dict(base, status="no_term", reason=doc.get("reason") or "the selected equation is a bare constant",
+                    equation_sympy=None, equation_latex=None)
+    sy, lx = residual_forms(doc)
+    return dict(base, status="term", reason="selected", equation_sympy=sy, equation_latex=lx, equation_raw=doc["equation"])
+
+
+def _gate_block(gate, path):
+    if gate is None:
+        return {"status": "absent", "reason": f"{Path(path).name} does not exist"}
+    keep = {k: gate.get(k) for k in ("pilot", "filter", "hard_stop", "would_hard_stop", "low_confidence", "complete", "delta",
+                                     "reasons", "verdicts")}
+    for k in ("positive", "null_A", "null_B", "contraction", "stability", "preprocessing"):
+        sub = gate.get(k)
+        keep[k] = None if not isinstance(sub, dict) else {kk: sub[kk] for kk in ("pass", "n", "n_fail", "n_pending", "upper_bound_95",
+                                                                                 "contraction_min", "not_identifiable", "note")
+                                                          if kk in sub}
+    return dict(keep, status="present", sha256=_sha(path))
+
+
+def _gains_block(c3, cfg):
+    """Estimated coupling gains: median and quartiles over every session estimate in the c3 file (descriptive)."""
+    if c3 is None:
+        return {"status": "absent", "reason": "no c3 file"}
+    out = {"status": "present", "estimator": c3.get("estimator", {}).get("mode"), "directions": {}}
+    sessions = [v for per in c3.get("gains_per_session", {}).values() for v in per.values() if v is not None]
+    lo, mid, hi = cfg["statistics"]["diagnostics"]["summary_percentiles"]
+    for d in sorted(c3.get("all_pairs", {}).get("directions", {})):
+        vals = np.array([v[d] for v in sessions if v.get(d) is not None], dtype=np.float64)
+        out["directions"][d] = (None if vals.size == 0 else
+                                {"n_sessions": int(vals.size), "median": float(np.percentile(vals, mid)),
+                                 "q25": float(np.percentile(vals, lo)), "q75": float(np.percentile(vals, hi))})
+    return out
+
+
+def phase_seconds(cfg, root, pilot):
+    """{phase: wall seconds} from the JSON phase flags (H0); a legacy timestamp-only or missing flag gives None."""
+    out = {}
+    for n in cfg["statistics"]["summary"]["phases"]:
+        p = Path(root) / cfg["paths"]["pilot_phase_flag_pattern" if pilot else "phase_flag_pattern"].format(n=n)
+        try:
+            out[f"phase{n}"] = float(json.loads(p.read_text(encoding="utf-8"))["wall_seconds"])
+        except (OSError, ValueError, KeyError, TypeError):
+            out[f"phase{n}"] = None
+    return out
+
+
+def build_summary(cfg, root, seed, *, pilot, timings=None):
+    """The summary.json document (§18.2): gate status, the residual in sympy and LaTeX form with its signature, the C1 to C4
+    verdicts with key statistics, the Holm family, the estimated gains and the compute time. A part whose input file is
+    missing is written as absent with the reason; nothing is recomputed (no resampling, no filtering). `timings` adds the
+    seconds of steps of the phase that is still running (phase 3 writes this file before its own flag exists)."""
+    from src import regression, tuning
+    root = Path(root)
+    paths = summary_inputs(cfg, root, seed, pilot)
+    docs = {k: _read_json(p) for k, p in paths.items() if k != "frozen_equation"}
+    fpath = paths["frozen_equation"]
+    frozen = regression.load_frozen_equation(fpath) if fpath.is_file() else None
+    gate = docs["gate"]
+    low = None if gate is None else gate.get("low_confidence")
+    mech = bool(pilot)
+
+    def claim(doc, verdict_key, pick):
+        if doc is None:
+            return {"status": "absent", "verdict": {"passed": None, "reason": "its result file does not exist"},
+                    "low_confidence": low, "mechanics_only": mech}
+        return dict({"status": doc.get("status", "present"), "verdict": doc.get(verdict_key), "low_confidence": low,
+                     "mechanics_only": bool(doc.get("mechanics_only", mech))}, **pick(doc))
+
+    c1, c2, c3, c4 = docs["c1"], docs["c2"], docs["c3"], docs["c4"]
+    seeds = {}
+    for s in cfg["split"]["extra_seeds"]:
+        d = docs[f"c1_{s}"]
+        seeds[str(s)] = None if d is None else {"passed": d["c1_verdict"]["passed"], "reason": d["c1_verdict"]["reason"]}
+    claims = {
+        "C1": claim(c1, "c1_verdict", lambda d: {
+            "means": d["primary"].get("means"), "n_subjects": d["primary"].get("n_subjects"),
+            "comparisons": {k: {kk: v.get(kk) for kk in ("difference", "ci", "p", "role")}
+                            for k, v in d["primary"].get("comparisons", {}).items()},
+            "bootstrap": d["primary"].get("bootstrap"), "divergence": d.get("divergence"),
+            "m3_mode": d["m3"]["mode"], "other_seeds": seeds}),
+        "C2": claim(c2, "c2_verdict", lambda d: {"a_signature_recurrence": d.get("a_signature_recurrence"),
+                                                 "b_seed_rule": d.get("b_seed_rule"), "missing_inputs": d.get("missing_inputs")}),
+        "C3": claim(c3, "verdict", lambda d: {"all_pairs": {k: v for k, v in d.get("all_pairs", {}).items()
+                                                            if k != "index_matrix_sha256"},
+                                              "test_partition_pairs": d.get("test_partition_pairs"),
+                                              "criterion": d.get("criterion"), "estimator": d.get("estimator"),
+                                              "excluded_pairs": d.get("excluded_pairs")}),
+        "C4": claim(c4, "c4_verdict", lambda d: {"reason": d.get("reason"), "stability_condition": d.get("stability_condition"),
+                                                 "ratio_analysis": d.get("ratio_analysis"), "gate": d.get("gate")})}
+    diag = docs["diagnostics"]
+    secs = phase_seconds(cfg, root, pilot)
+    secs.update(timings or {})
+    head, dirty = tuning._git_state(root)
+    doc = {"schema": int(cfg["statistics"]["summary"]["schema_version"]), "pilot": mech, "mechanics_only": mech,
+           "mode": "pilot" if pilot else "confirmatory", "split_seed": int(seed), "filter": passes.resolve_filter(cfg),
+           "low_confidence": low, "gate": _gate_block(gate, paths["gate"]),
+           "residual": _residual_block(frozen, low, pilot), "claims": claims,
+           "holm": holm_from_files(cfg, c1, c2, c3, c4, pilot), "coupling_gains": _gains_block(c3, cfg),
+           "diagnostics": None if diag is None else {"connectivity_summary": diag.get("connectivity", {}).get("summary"),
+                                                     "aaft": {k: diag.get("aaft", {}).get(k) for k in
+                                                              ("n_recordings", "n_significant", "n_surrogates",
+                                                               "p_threshold", "limitation")}},
+           "sensitivity": None if docs["sensitivity"] is None else {k: docs["sensitivity"].get(k) for k in
+                                                                    ("n_matched", "matched_subjects", "summary", "note")},
+           "compute_time_s": secs,
+           "inputs": {k: ({"file": Path(p).name, "sha256": _sha(p)} if Path(p).is_file() else None) for k, p in paths.items()},
+           "missing_inputs": sorted(k for k, p in paths.items() if not Path(p).is_file())}
+    doc["provenance"] = {"git_commit": head, "git_dirty": dirty, "code_sha256": _code_sha(),
+                         "config_yml_sha256": _sha(root / "config.yml")}
+    return _clean(doc)
+
+
+def build_equations_tex(summary, frozen_doc, cfg):
+    """results/equations.tex (§18.2): a standalone fragment for \\input{}: the frozen residual on its own and the full model
+    equation with the residual underbraced. With no residual (absent, bare constant) or low_confidence the status is written
+    explicitly, never omitted. Deterministic (no timestamp)."""
+    res, low = summary["residual"], summary["low_confidence"]
+    L = ["% Auto-generated by src/robustness.py (G8, section 18.2); regenerating overwrites this file. Needs amsmath.",
+         f"% residual status: {res['status']}; low_confidence: {low}; mechanics_only: {summary['mechanics_only']}",
+         f"% frozen equation sha256: {res.get('frozen_equation_sha256')}", ""]
+    if summary["mechanics_only"]:
+        L += [r"\textbf{Pilot run: mechanics only, not a result.}", ""]
+    if low:
+        L += [r"\textbf{Low confidence: the synthetic gate G0 did not fully pass.}", ""]
+    if res["status"] == "absent":
+        return "\n".join(L + [r"\textbf{Residual absent: no frozen equation exists.}"]) + "\n"
+    if res["status"] == "no_term":
+        return "\n".join(L + [r"\textbf{No residual term: the selected equation is a bare constant, so $M_3 = M_2$.}"]) + "\n"
+    from src import regression
+    dg = int(cfg["statistics"]["summary"]["latex_sig_digits"])
+    z = frozen_doc["zscore"]
+
+    def fmt(x):
+        return f"{float(x):.{dg}g}"
+
+    names = regression.INPUT_NAMES
+    raw = {names[0]: r"u_{\mathrm{tgt}}(t)", names[1]: r"u_{\mathrm{src}}(t-d)", names[2]: r"S\!\left(u_{\mathrm{src}}(t-d)\right)"}
+    sy = _latex_symbols()
+    zs = r" \\ ".join(r"%s &= \frac{%s - %s}{%s}" % (sy[n], raw[n], fmt(m), fmt(s)) for n, m, s in zip(names, z["mean_X"], z["sd_X"]))
+    L += [r"\begin{equation}",
+          r"\dot y_{4,j} = A a \Big[\, p_j + g_{ij}\, S\!\big(u_i(t-d)\big) + C_2\, S(C_1\, y_{0,j}) \Big]"
+          r" - 2a\, y_{4,j} - a^2 y_{1,j}"
+          r" + \underbrace{\mu_y + \sigma_y\, f(\cdot)}_{\text{frozen residual } r}",
+          r"\end{equation}",
+          r"\begin{equation}", "f = " + res["equation_latex"], r"\end{equation}",
+          r"\begin{align}", zs + r" \\", r"\mu_y &= %s, \qquad \sigma_y = %s" % (fmt(z["mean_y"]), fmt(z["sd_y"])), r"\end{align}",
+          r"% u = y_1 - y_2 of the node (unscaled smoothed potential); node j is driven by node i; the products of the tilde",
+          r"% variables are separate PySR inputs (section 8.2)."]
+    return "\n".join(L) + "\n"
+
+
+def _write_text(path, text):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    tmp.replace(path)
+
+
+def run_summary(cfg, root, seed, *, pilot, timings=None):
+    """Write summary.json and equations.tex. Both are derived files: rewritten on every call, byte-identical for identical
+    inputs, never read back by an earlier phase (§18.1). Returns the paths and the summary document."""
+    from src import regression
+    root = Path(root)
+    summary = build_summary(cfg, root, seed, pilot=pilot, timings=timings)
+    fpath = regression.frozen_equation_path(cfg, root, seed, pilot)
+    fz = regression.load_frozen_equation(fpath) if fpath.is_file() else None
+    sp, tp = summary_paths(cfg, root, pilot)
+    _write_text(sp, json.dumps(summary, sort_keys=True, indent=2) + "\n")
+    _write_text(tp, build_equations_tex(summary, None if fz is None else fz.doc, cfg))
+    log.info("summary written: %s, %s", sp, tp)
+    return {"summary_path": sp, "equations_path": tp, "summary": summary}

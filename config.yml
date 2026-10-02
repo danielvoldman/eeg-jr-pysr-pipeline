@@ -599,6 +599,10 @@ statistics:
     output_pattern: {value: "c4_{seed}.json", prov: placeholder, ref: "§18.1, IMP-086", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
     cache_subdir: {value: "c4_freerun", prov: placeholder, ref: "§18.1, IMP-086", note: "per-recording window errors under paths.cache_dir"}
     schema_version: {value: 1, prov: placeholder, ref: "IMP-086"}
+  summary:
+    schema_version: {value: 1, prov: placeholder, ref: "§18.2, IMP-088"}
+    phases: {value: [1, 2, 3, 4], prov: locked, ref: "§18.1", note: "the four phases whose wall seconds the summary reads from the phase flags"}
+    latex_sig_digits: {value: 6, prov: placeholder, ref: "§18.2, IMP-088", note: "significant digits of the z-scoring constants in equations.tex"}
   criteria:
     c2_signature_recurrence_min: {value: 0.70, prov: placeholder, ref: "§15.1"}
     c2_min_seeds_passing_c1: {value: 4, prov: locked, ref: "§15.1", note: "of 5"}
