@@ -303,15 +303,17 @@ def check_gate(cfg, root):
 
 def make_real_loader(cfg, root, pilot_ids, allow_all):
     """Loader for collect_recordings: the ses-t1 recording of a subject through B4/B5 (cached) and the B6
-    decision. Imports preprocess lazily."""
+    decision. Imports preprocess lazily. load(subject, session=None) reads another session when asked (C3, IMP-081);
+    the default stays ses-t1, and the result also carries the stored B5 vigilance and the session."""
     from src import preprocess as pp
     root = Path(root)
     manifest = pp.load_manifest(root / cfg["paths"]["manifest_file"])
     cache_root = root / cfg["paths"]["cache_dir"]
     data_root = root / cfg["paths"]["data_dir"]
-    session = cfg["dataset"]["session_first"]
+    default_session = cfg["dataset"]["session_first"]
 
-    def load(subject):
+    def load(subject, session=None):
+        session = default_session if session is None else session
         pattern = cfg["dataset"]["eeg_glob"].replace("sub-*", subject, 1)
         files = [f for f in sorted(data_root.glob(pattern)) if session in f.parts]
         if len(files) != 1:
@@ -322,7 +324,8 @@ def make_real_loader(cfg, root, pilot_ids, allow_all):
         if decision["status"] != "kept":
             return {"reason": f"excluded: {decision['reason']}"}
         key = "b5:" + pp.cache_key_b5(cfg, res.meta["sha256"], False, False)
-        return {"reason": None, "segments": res.segments, "starts": res.starts, "key": key}
+        return {"reason": None, "segments": res.segments, "starts": res.starts, "key": key, "session": session,
+                "vigilance": res.meta["b5"]["vigilance"]}
 
     return load
 

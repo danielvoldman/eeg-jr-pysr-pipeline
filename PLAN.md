@@ -451,17 +451,21 @@ Done when:
 
 Note (2026-10-01): partly done inside G1. Done: 10,000 resamples (pilot 100) from a pre-drawn index matrix, vectorized (robustness.draw_index_matrix, resample_means, paired_bootstrap); the cluster argument (cluster labels, clustered draw) exists and is unit-tested with hand cases, but nothing uses it yet (C1 is t1 only; C3 will); holm(p, m) is implemented and tested. NOT done, so the box stays open: the Holm family itself (the four §15.2 bullets, one of which holds two tests; the other members come from G3 to G5) and the adjusted values; the C1 file reports raw p only, holm_status 'partial_family'.
 
+Note (2026-10-01, G2 stage; IMP-080): the Holm FAMILY is now defined: 11 members (2 + 3 + 2 + 4, option c, departs from the four-bullets wording of section 14), registry robustness.holm_members, statistics.holm_family_size = 11, and robustness.holm_report refuses to give any adjusted value until all 11 raw p exist (status partial_family). Still NOT done, so the box stays open: the members of G3 (c1_seed:43 to 46) and G5 (freerun:2s, 5s, 10s) do not exist yet, hence no adjusted value; the adjustment runs once in G8. The cluster bootstrap is used by C3 (G4 below) through whole-pair resampling of the pre-drawn matrix.
+
 ### [ ] G3. C2 aggregation
 Read: §15.
 Done when the ≥ 70% signature recurrence and the "C1 passes in ≥ 4 of 5 seeds" rule are both computed.
 
-### [ ] G4. C3 ICC
+### [~] G4. C3 ICC (machinery done on pilot data; the confirmatory M3 estimate waits for a frozen equation)
 Read: §11.3, §15.
 Note (C3): the section 11.3 estimator (frozen base + PySR residual model) is deferred here: it needs a residual hook in ukf/state_space predict. Until then passes.Pass1Result.gain_estimate gives the base-model filtered-gain mean (the section 9.2 null-gate estimator).
 Done when:
 - ICC(3,1) is computed per direction, with an F-based confidence interval.
 - It is computed for all pairs and for test-only pairs.
 - The vigilance-adjusted version is reported alongside.
+
+Note (2026-10-01, merged G2 stage; IMP-081): done in robustness.py: ICC(3,1) per direction (g12, g21), F-based CI, F-test p, cluster-bootstrap CI (whole pairs, B 10,000, pilot 100), vigilance-adjusted ICC (pooled regression with intercept, stored B5 vigilance), all pairs and test-partition pairs, the unadjusted-ICC verdict, the observed ICC equal to a CI lower bound of 0.40 (about 0.63 at n = 42), pair rules with listed exclusions, the pilot-only guard (resolve_c3_subjects), results/pilot/c3_42.json. The section 11.3 estimator (frozen base + residual) is wired through the G0.5 NumPy filter. NOT done: no frozen equation exists, so the pilot file uses the M2 stand-in and makes no verdict (mechanics only); the test-partition ICC and the confirmatory run have not been run. Pilot real data: 2 usable pairs of the 4 pilot subjects with a second session (sub-051 ses-t2 has too little clean data; sub-074 ses-t1 diverged), so the ICC numbers mean nothing. Box left open ([~]) for that reason.
 
 ### [ ] G5. C4 free-run
 Read: §10.2, §15.
@@ -472,9 +476,11 @@ Done when:
 - The upper CI bound of the ratio must be ≤ 1.20.
 - The scoring condition is checked.
 
-### [ ] G6. Diagnostics
+### [x] G6. Diagnostics
 Read: §14.
 Done when wPLI, imaginary coherency and the AAFT test (10 recordings × 50 surrogates) are computed.
+
+Note (2026-10-01, merged G2 stage; IMP-082): done on pilot data only. robustness.connectivity (plain wPLI, imaginary coherency signed, 2-s Hann epochs, 0.5-Hz grid, bands 8 to 13 and 1 to 45 Hz), connectivity_summary (median and IQR, no test), AAFT (per clean segment and channel, seed 42, rng [seed, recording_index, surrogate_index], p = (1 + k) / (N + 1), diverged surrogate counts as exceeding, diverged real recording replaced), run_diagnostics, results/pilot/diagnostics_42.json. Pilot run: 405 s on 4 workers (loky); only 6 of the 12 pilot recordings had a non-diverged real M2 run, so AAFT ran on 6 recordings (not 10): 3 of 6 with p < 0.05, mechanics only. The confirmatory run (10 test recordings) is not done.
 
 ### [ ] G7. §5.2 sensitivity analysis
 Read: §5.2.

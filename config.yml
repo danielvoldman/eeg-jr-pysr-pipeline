@@ -549,13 +549,33 @@ statistics:
   ci_level: {value: 0.95, prov: locked, ref: "§15.1"}
   icc_form: {value: "ICC(3,1) consistency", prov: locked, ref: "§11.3"}
   icc_ci_method: {value: "F-based", prov: placeholder, ref: "§14"}
-  holm_family_size: {value: 4, prov: placeholder, ref: "§14, §15.2"}
+  holm_family_size: {value: 11, prov: placeholder, ref: "§14, §15.2, IMP-080", note: "decided 2026-10-01 (Daniel Voldman): every test of the four §15.2 bullets counts, bullet 4 over the 4 non-primary split seeds: 2 (C1 M0->M1, M1->M2) + 3 (free-run per scoring window 2/5/10 s) + 2 (test-partition ICC, g12 and g21) + 4 = 11; departs from the four-bullets wording of §14; checked against the member registry (robustness.holm_members)"}
   wpli_bands_hz: {value: [[8, 13], [1, 45]], prov: placeholder, ref: "§14"}
+  c3:
+    output_pattern: {value: "c3_{seed}.json", prov: placeholder, ref: "§18.1, IMP-081", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
+    cache_subdir: {value: "c3_gains", prov: placeholder, ref: "§18.1, IMP-081", note: "per-recording filtered-gain estimate under paths.cache_dir"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-081"}
+    directions: {value: ["g12", "g21"], prov: locked, ref: "§7.4, §11.3"}
+    pair_rule: {value: "both_sessions_not_diverged", prov: placeholder, ref: "§11.3, §12, IMP-081", note: "decided 2026-10-01 (Daniel Voldman): a pair needs both sessions kept and neither diverged at recording level under the estimating model; excluded pairs are counted and listed with the reason"}
+    vigilance_covariate: {value: "mean_alpha_theta_over_all_epochs_and_both_channels", prov: placeholder, ref: "§11.3, IMP-081", note: "from the stored B5 vigilance: every 2-s epoch of every clean segment of the session (including the estimator burn-in), pre-rescaling, mean over epochs and over the two channels; regression per direction on all sessions pooled, with intercept"}
+    icc_p_value: {value: "F_test_icc_zero_one_sided", prov: placeholder, ref: "§15.2, IMP-081", note: "raw p of the test-partition ICC members of the Holm family: upper tail of F = MSR/MSE on (n-1, (n-1)(k-1)) df, H0 ICC = 0"}
+  wpli:
+    epoch_s: {value: 2, prov: placeholder, ref: "§14, IMP-082", note: "non-overlapping Hann epochs inside each clean segment (a partial epoch is dropped), mean removed per epoch; 0.5-Hz grid"}
+    estimator: {value: "wpli_vinck_2011_plain", prov: placeholder, ref: "§14, IMP-082", note: "per bin |mean Im S| / mean |Im S| over all epochs of the recording; imaginary coherency Im(mean S) / sqrt(mean|X1|^2 mean|X2|^2), stored signed and reported as |Im|; S = X1 conj(X2); band value = mean over the bins of the band, both band edges included"}
+  diagnostics:
+    output_pattern: {value: "diagnostics_{seed}.json", prov: placeholder, ref: "§18.1, IMP-082", note: "wPLI, imaginary coherency and the AAFT test; under paths.results_dir (pilot: paths.pilot_results_dir)"}
+    cache_subdir: {value: "aaft", prov: placeholder, ref: "§18.1, IMP-082", note: "per-recording surrogate statistics under paths.cache_dir"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-082"}
+    summary_percentiles: {value: [25, 50, 75], prov: placeholder, ref: "§14, IMP-082", note: "first quartile, median, third quartile over recordings (the median and IQR of the wPLI summary)"}
   aaft:
     n_recordings: {value: 10, prov: locked, ref: "§14"}
     n_surrogates: {value: 50, prov: locked, ref: "§14"}
-    seed: {value: null, prov: unset, ref: "§14", note: "doc says fixed seed, gives no value"}
+    seed: {value: 42, prov: placeholder, ref: "§14, IMP-082", note: "decided 2026-10-01 (Daniel Voldman); surrogate rng = default_rng([seed, recording_index, surrogate_index]), recording_index = position in the sorted plan IDs; the draw of the recordings uses default_rng([seed, number of planned subjects])"}
     p_threshold: {value: 0.05, prov: locked, ref: "§14"}
+    statistic: {value: "max_abs_filtered_M2_gain", prov: placeholder, ref: "§14, IMP-082", note: "max(|g12|, |g21|) of the mean filtered M2 gain (filter A, q_fixed, after both burn-ins)"}
+    p_rule: {value: "one_plus_k_over_n_plus_one", prov: placeholder, ref: "§14, IMP-082", note: "p = (1 + k) / (N + 1), k = surrogates whose statistic is at least the real one, a diverged surrogate counting as at least as large (the literal share of §14 would allow p = 0)"}
+    unit: {value: "clean_segment_and_channel", prov: placeholder, ref: "§14, IMP-082", note: "each clean segment of each channel gets its own AAFT surrogate; starts and gaps are kept"}
+    surrogates_per_task: {value: 5, prov: placeholder, ref: "§16.5.1, IMP-082", note: "pool task size only; no effect on results"}
   criteria:
     c2_signature_recurrence_min: {value: 0.70, prov: placeholder, ref: "§15.1"}
     c2_min_seeds_passing_c1: {value: 4, prov: locked, ref: "§15.1", note: "of 5"}
@@ -586,6 +606,7 @@ open_questions_for_implementation:
   - "rescaling.reference_simulation: seed, burn-in, single node vs two-node at g=0, integrator, noise redraw interval (PLAN.md A4)"
   # decided in IMP-009 (now placeholders): bad_channel.flatline_threshold, bad_channel.saturation_min_run_s, line_noise.notch_q
   # decided in IMP-054 (residual.tv_weight_grid) and IMP-056 (pysr.subsample.seed and pysr.seeds)
-  - "g0.seeds, aaft.seed: seed values"
+  # decided in IMP-082: aaft.seed = 42 (placeholder)
+  - "g0.seeds: seed values"
   - "pysr.version: exact version to pin at setup"
   - "ukf.numba.enabled: decided by the pilot validation (§21.2 #4); set true in DEV-005 (2026-10-01)"
