@@ -523,6 +523,11 @@ Done when:
 
 - [ ] Finalize every PLACEHOLDER in `config.yml`, and log each one in `DEVIATIONS.md` §3. This must be done **before** any full-cohort result is inspected.
 
+### Limitations to carry into the paper (pilot C1 diagnostic, IMP-079)
+- On this oversampled, band-limited signal the one-step prediction metric favours a linear VAR over the Jansen-Rit UKF by about three orders of magnitude (pilot, 3 subjects: VAR 0.00025 to 0.00046, UKF M1/M2 0.14 to 0.20, persistence 0.06 to 0.09, in rescaled units; R = 0.32, NIS 0.52 to 0.68).
+- M3 < M0 (second half of C1) is therefore expected to fail; this is a property of the metric and of the specified R, not a defect. R_fraction stays 0.25 and is revisited only in Stage J through a DEV entry. A negative C1 with a detectable-not-exact reading is an accepted outcome.
+- The G0 gate covers only the limit-cycle regime (HANDOFF); state it next to this.
+
 ## Stage K: Full run
 
 - [ ] Phase 1: preprocessing, then G0 (can run alone over one or two nights)
