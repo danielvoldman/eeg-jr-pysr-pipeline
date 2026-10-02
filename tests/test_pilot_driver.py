@@ -352,7 +352,7 @@ def test_format_comparison_marks_the_diagnostic_columns_and_the_refusal():
 
 def test_e5_source_and_config_rules():
     src = SRC.read_text(encoding="utf-8")
-    e5 = src.split("# ---------------------------------------------------------------- E5")[1].split("# ---------------------------------------------------------------- the E1 report")[0]
+    e5 = src.split("# ---------------------------------------------------------------- E5")[1].split("# ---------------------------------------------------------------- K0")[0]
     assert not re.search(r"np\.random\.(?!default_rng)", src) and "gate_file" not in e5 and "check_gate" not in e5
     p = CFG["g0"]["pilot"]
     assert p["tuning_fallback"] == "flag_off_nis" and p["max_estimated_hours"] == 10 and p["timing_series_index"] == 2 and p["timing_q"] == 1.0e-2

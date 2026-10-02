@@ -561,6 +561,7 @@ Done when:
 ### [ ] K0. Formal G0 null arms, UKF-only (IMP-094; approved 2026-10-02)
 Read: §5.2, §9.2, §9.4, §15.1, §18.1, §20; IMP-069, IMP-090, IMP-093, IMP-094.
 Steps, in order: (1) docs commit (IMP-094) BEFORE any run; (2) driver `python -m src.synthetic_gate --g0-null-arms`, seed ledger, `not_run` state, main.py / tuning.py gate fixes, tests with mutations, own commit; (3) `--estimate-only` (preprocessing of the 78 training subjects, regime grid, series), STOP and ask above about 1 h in total, no fall back to the pilot table; (4) the single formal run (block 92000, Null A and Null B, 60 each, filter A at q_fixed, legacy rule, delta 1.08); the cited artifact-only null of block 94000 comes from the pilot (burnt). Writes results/g0_null_arms_r0.json always and outputs/gate.json only on a null failure.
+Note (2026-10-02, step 2 done: IMP-095): driver, ledger, not_run state, main.py / tuning.py gate fixes built; tests/test_formal_null_arms.py (35 tests, 26 mutations killed). Steps 3 and 4 pending.
 Done when: the formal document exists with per-arm dropped / outside delta / false positives / bound / flag-off split, the ledger shows the claim, and the outcome (hard stop and write-up, or PySR stage) is recorded in HANDOFF.
 
 - [ ] Phase 1: preprocessing, then G0 (can run alone over one or two nights)

@@ -38,7 +38,12 @@ stops above g0.pilot.max_estimated_hours, then runs the UKF-only stage for every
 passes, rule ON plus the flag-off diagnostic), writes results/pilot/gate_<option>.json and g0_filter_comparison.json and
 prints one table per option. No PySR, never outputs/gate.json, no DEV-005 decision.
 
+K0 (IMP-094): run_formal_null_arms() is the formal UKF-only run of Null A and Null B (60 series each, block g0.seeds.full,
+filter A at q_fixed, legacy divergence rule): seed ledger, the not_run verdict state, results/g0_null_arms_r<round>.json
+(write-once) and outputs/gate.json only on a null failure.
+
 Entry points: python -m src.synthetic_gate --pilot [--estimate-only]       (E5)
+              python -m src.synthetic_gate --g0-null-arms [--estimate-only]   (K0)
               python -m src.synthetic_gate --grid-report --pilot
               python -m src.synthetic_gate --time-series --pilot
               python -m src.synthetic_gate --time-gate-series --pilot
@@ -1267,8 +1272,9 @@ def gate_flags(pilot, verdicts):
     would = any(verdicts.get(k) is False for k in HARD_STOP_VERDICTS)
     low = any(verdicts.get(k) is False for k in LOW_CONFIDENCE_VERDICTS)
     pending = sorted(k for k, v in verdicts.items() if v is None)
+    not_run = sorted(k for k, v in verdicts.items() if isinstance(v, str) and v == "not_run")        # K0 (IMP-094)
     return {"would_hard_stop": bool(would), "hard_stop": bool(would and not pilot), "low_confidence": bool(low),
-            "pending": pending, "complete": not pending}
+            "pending": pending, "not_run": not_run, "complete": not pending and not not_run}
 
 
 def gain_profile(cfg, records):
@@ -1367,7 +1373,8 @@ def build_gate_document(cfg, root, *, pilot, filter_name, verdicts, sections, q=
     head, dirty = tuning._git_state(Path(root))
     doc = {"schema_version": cfg["g0"]["gate_schema_version"], "pilot": bool(pilot), "filter": filter_name,
            "hard_stop": flags["hard_stop"], "low_confidence": flags["low_confidence"],
-           "would_hard_stop": flags["would_hard_stop"], "pending": flags["pending"], "complete": flags["complete"],
+           "would_hard_stop": flags["would_hard_stop"], "pending": flags["pending"], "not_run": flags["not_run"],
+           "complete": flags["complete"],
            "reasons": reasons, "delta": delta(cfg), "verdicts": dict(verdicts), "q": q, "parsimony": parsimony,
            "seeds": seeds if seeds is not None else dict(cfg["g0"]["seeds"]),
            "provenance": {"git_commit": head, "git_dirty": dirty,
@@ -1835,6 +1842,470 @@ def run_pilot(cfg, root, n_jobs=None, estimate_only=False, options=None):
     return report
 
 
+# ---------------------------------------------------------------- K0: the formal null arms, UKF-only (IMP-094)
+
+FORMAL_STREAM = "full"
+FORMAL_ARMS = ("null_A", "null_B")
+NOT_RUN = "not_run"
+FORMAL_NOT_RUN = ("positive", "contraction", "stability", "preproc_bias")
+STATUSES = ("dropped", "outside_delta", "inside_delta")
+
+
+class FormalStop(GateError):
+    """The formal run (or its estimate) stops and asks: cost above g0.formal.max_total_hours."""
+
+
+def formal_round(cfg):
+    return int(cfg["g0"]["formal"]["round"])
+
+
+def formal_paths(cfg, root):
+    """results/g0_null_arms_r<round>.json, results/g0_seed_ledger.json and outputs/gate.json (all under root)."""
+    root, fc = Path(root), cfg["g0"]["formal"]
+    res = root / cfg["paths"]["results_dir"]
+    return {"results": res / fc["null_arms_file"].format(round=formal_round(cfg)), "ledger": res / fc["ledger_file"],
+            "gate": root / cfg["paths"]["gate_file"]}
+
+
+def formal_pairs(cfg):
+    """(effective seed block, arm) of every series set the formal run consumes."""
+    return [(stream_base(cfg, FORMAL_STREAM, formal_round(cfg)), arm) for arm in FORMAL_ARMS]
+
+
+def _write_json_atomic(path, doc):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(_jsonable(doc), indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+    tmp.replace(path)
+
+
+def write_once(path, doc):
+    """Atomic and write-once: the document is written to a temporary file and hard-linked to `path`, which fails if `path`
+    exists (an existing result is never replaced, whatever its content)."""
+    import os
+    path = Path(path)
+    if path.exists():
+        raise GateError(f"{path} exists: a formal result is written once and never replaced")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(_jsonable(doc), indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+    try:
+        os.link(tmp, path)
+    except FileExistsError as exc:
+        raise GateError(f"{path} exists: a formal result is written once and never replaced") from exc
+    finally:
+        tmp.unlink()
+    return path
+
+
+def _burnt_entries(cfg):
+    return {f"{b['block']}:{b['arm']}": {"block": int(b["block"]), "arm": b["arm"], "status": "burnt", "reason": b["reason"]}
+            for b in cfg["g0"]["formal"]["burnt_blocks"]}
+
+
+def ledger_entries(cfg, path):
+    """The ledger as it stands: the entries on disk plus the configured burnt blocks (which are always in force)."""
+    path, disk = Path(path), {}
+    if path.is_file():
+        disk = json.loads(path.read_text(encoding="utf-8"))["entries"]
+    return {**_burnt_entries(cfg), **disk}
+
+
+def ledger_blocked(entries, block, arm):
+    """(key, entry) of the first ledger entry that refuses a claim of (block, arm): the same key at any status, or a wildcard
+    ('*') entry of the block; None when free."""
+    for key, e in entries.items():
+        if int(e["block"]) == int(block) and e["arm"] in ("*", arm):
+            return key, e
+    return None
+
+
+def ledger_claim(cfg, path, pairs, info):
+    """Claim (block, arm) pairs with status 'started', BEFORE the first series is evaluated: a crash still burns the seeds.
+    Any blocked pair refuses the whole claim and nothing is written. Entries are append-only."""
+    entries = ledger_entries(cfg, path)
+    for block, arm in pairs:
+        hit = ledger_blocked(entries, block, arm)
+        if hit is not None:
+            raise GateError(f"seed block {block} arm {arm} is already {hit[1]['status']} ({hit[0]}: "
+                            f"{hit[1].get('reason') or hit[1].get('commit')}); a rerun needs a fix, a DEV entry and fresh seeds")
+    for block, arm in pairs:
+        entries[f"{block}:{arm}"] = {"block": int(block), "arm": arm, "status": "started", **info}
+    _write_json_atomic(path, {"schema_version": cfg["g0"]["formal"]["schema_version"], "entries": entries})
+
+
+def ledger_complete(cfg, path, pairs, info):
+    """started -> completed, adding the result hash and outcome; only an entry in status 'started' may be completed."""
+    entries = ledger_entries(cfg, path)
+    for block, arm in pairs:
+        e = entries.get(f"{block}:{arm}")
+        if e is None or e["status"] != "started":
+            raise GateError(f"ledger entry {block}:{arm} is not in status started; cannot complete it")
+        entries[f"{block}:{arm}"] = {**e, "status": "completed", **info}
+    _write_json_atomic(path, {"schema_version": cfg["g0"]["formal"]["schema_version"], "entries": entries})
+
+
+def formal_preconditions(cfg, root, estimate_only=False):
+    """Every refusal of the formal run (IMP-094 (8)), collected and raised together. The estimate needs the configuration
+    checks only; the run also needs a clean git tree, free seeds and no existing result or gate file."""
+    from src import tuning
+    problems = []
+    try:
+        if passes_module.resolve_filter(cfg) != "A":
+            problems.append("g0.filter is not A")
+    except passes_module.PassError as exc:
+        problems.append(f"g0.filter: {exc}")
+    q_fixed = cfg["ukf"]["process_noise"]["q_fixed"]
+    if g0_q(cfg, "A") != q_fixed:
+        problems.append(f"G0 q {g0_q(cfg, 'A')} is not q_fixed {q_fixed}")
+    dv = cfg["ukf"]["divergence"]
+    if dv.get("state_dwell_s") != 0 or dv.get("parameter_sd_multiple") is not None:
+        problems.append("the divergence rule is not the legacy first-crossing rule (state_dwell_s 0, parameter_sd_multiple null)")
+    d = delta(cfg)
+    if abs(d - cfg["g0"]["formal"]["delta_expected"]) > 1e-12 or d > level_gain(cfg, 0) + 1e-12:
+        problems.append(f"delta {d} is not g0.formal.delta_expected or exceeds the weakest planted level")
+    if cfg["g0"]["n_null_A_full"] != 60 or cfg["g0"]["n_null_B_full"] != 60:
+        problems.append("the formal arms are 60 series each")
+    if cfg["g0"]["backend"] != "numba":
+        problems.append("g0.backend is not numba")
+    for mod in ("pysr", "juliacall"):
+        if mod in sys.modules:
+            problems.append(f"{mod} is imported: the UKF-only run must not load PySR")
+    if not estimate_only:
+        paths = formal_paths(cfg, root)
+        head, dirty = tuning._git_state(Path(root))
+        if head is None or dirty is None or dirty:
+            problems.append("the git tree is not clean (or git is unavailable)")
+        if paths["results"].exists():
+            problems.append(f"{paths['results'].name} exists")
+        if paths["gate"].exists():
+            problems.append(f"{paths['gate'].name} exists: a gate file already stands")
+        entries = ledger_entries(cfg, paths["ledger"])
+        for block, arm in formal_pairs(cfg):
+            hit = ledger_blocked(entries, block, arm)
+            if hit is not None:
+                problems.append(f"seed block {block} arm {arm} is already {hit[1]['status']}")
+    if problems:
+        raise GateError("formal null arms refused: " + "; ".join(problems))
+
+
+def cited_pilot_null(cfg, root):
+    """The pilot's artifact-only null (block 94000, burnt) as cited in the formal document: file hash and counts. Not a verdict
+    of this run (IMP-094 (3))."""
+    path = Path(root) / cfg["paths"]["pilot_results_dir"] / cfg["g0"]["formal"]["cited_pilot_gate_file"]
+    if not path.is_file():
+        raise GateError(f"{path} not found: the artifact-only null cannot be cited")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    pre = (doc.get("preprocessing") or {}).get("null") or {}
+    if not (doc.get("pilot") is True and doc.get("filter") == "A" and (doc.get("q") or {}).get("source") == "q_fixed"
+            and pre.get("n") == cfg["g0"]["n_preprocessing_gate_null"] and "n_fail" in pre):
+        raise GateError(f"{path.name} is not a filter-A q_fixed pilot gate with an artifact-only null of "
+                        f"{cfg['g0']['n_preprocessing_gate_null']} series")
+    return {"source_file": path.relative_to(Path(root)).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "n": int(pre["n"]), "n_fail": int(pre["n_fail"]), "delta": pre["delta"], "upper_bound_95": pre["upper_bound_95"],
+            "seed_block": int(cfg["g0"]["seeds"]["preprocessing_gate"]), "seed_block_status": "burnt (pilot, IMP-094)",
+            "rule": "0 of 20 required; the one-sided 95% bound at 0 of 20 is 0.139, which is NOT a 5% claim",
+            "is_verdict_of_this_run": False, "counts_toward_hard_stop": False}
+
+
+def formal_status(cfg, rec, flag_off=False):
+    """'dropped' (diverged under the rule, or no estimate), 'outside_delta' (either filtered |g| >= delta) or 'inside_delta' of
+    one null series, read from the rule-ON record or from its flag-off diagnostic."""
+    d = delta(cfg)
+    est = (rec.get("diagnostic_flag_off") or {}).get("estimates") if flag_off else (None if rec["diverged"] else rec["estimates"])
+    if est is None or "g12_filt" not in est:
+        return "dropped"
+    return "outside_delta" if abs(est["g12_filt"]) >= d or abs(est["g21_filt"]) >= d else "inside_delta"
+
+
+def _max_abs_g(est):
+    return None if est is None or "g12_filt" not in est else max(abs(est["g12_filt"]), abs(est["g21_filt"]))
+
+
+def formal_arm_report(cfg, arm, recs):
+    """One null arm: the section 9.2 verdict, the counts of dropped / outside delta / inside delta, the false positives (the
+    verdict's failures: dropped, outside delta or a selected term), the 95% bound and the flag-off diagnostic split (DIAGNOSTIC
+    ONLY). Without PySR has_term is None, so the false positives of the UKF-only run are the GAIN-HALF failures."""
+    v = null_arm_verdict(cfg, recs)
+    on = [formal_status(cfg, r) for r in recs]
+    off = [formal_status(cfg, r, True) for r in recs]
+
+    def counts(s):
+        return {k: int(sum(x == k for x in s)) for k in STATUSES}
+
+    c_on = counts(on)
+    if v["n_fail"] != c_on["dropped"] + c_on["outside_delta"] + sum(r["has_term"] is True for r in recs):
+        raise GateError(f"{arm}: the false-positive count disagrees with the per-series statuses")
+    rows = []
+    for r, a, b in zip(recs, on, off):
+        rows.append({"index": r["index"], "status_rule_on": a, "status_flag_off": b,
+                     "max_abs_g_rule_on": _max_abs_g(None if r["diverged"] else r["estimates"]),
+                     "max_abs_g_flag_off": _max_abs_g((r.get("diagnostic_flag_off") or {}).get("estimates")),
+                     "diverged_pass1": r["diverged_pass1"], "diverged_fraction_pass1": r["diverged_fraction_pass1"],
+                     "z_distance": r["z_distance"], "regime": r["regime"], "runtime_s": r.get("runtime_s"),
+                     "data_sha256": r.get("data_sha256")})
+    return {"arm": arm, "n": len(recs), "verdict": v["pass"], "false_positives": int(v["n_fail"]),
+            "n_pending": int(v["n_pending"]), "upper_bound_95": v["upper_bound_95"], "delta": v["delta"], "rule_on": c_on,
+            "flag_off_diagnostic": {"diagnostic_only": True, "never_decides_a_verdict": True, "counts": counts(off),
+                                    "cross_tab_rule_on_by_flag_off": {
+                                        f"{a}|{b}": int(sum(x == a and y == b for x, y in zip(on, off)))
+                                        for a in STATUSES for b in STATUSES}},
+            "stability_info_not_a_verdict": stability_verdict(recs), "per_series": rows}
+
+
+def formal_verdicts(arms):
+    """Gate verdicts of the UKF-only run: Null A and Null B from this run, preproc_null cited from the pilot, the four checks
+    that need the positive control or PySR 'not_run'."""
+    return {"null_A": arms["null_A"]["verdict"], "null_B": arms["null_B"]["verdict"], "preproc_null": "cited_pilot",
+            **{k: NOT_RUN for k in FORMAL_NOT_RUN}}
+
+
+def _config_sha256(cfg):
+    return hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def build_formal_document(cfg, root, *, arms, cited, inputs, timing, q, n_workers, files):
+    """results/g0_null_arms_r<round>.json: the formal evidence of the UKF-only null arms (IMP-094)."""
+    from src import tuning
+    verdicts = formal_verdicts(arms)
+    flags = gate_flags(False, verdicts)
+    head, dirty = tuning._git_state(Path(root))
+    return {"schema_version": cfg["g0"]["formal"]["schema_version"], "stage": "UKF-only (no PySR)", "round": formal_round(cfg),
+            "filter": "A", "q": q, "q_source": "q_fixed", "divergence_rule": "legacy first crossing",
+            "delta": delta(cfg), "n_workers": n_workers, "pilot": False,
+            "seeds": {arm: {"block": block, "stream": FORMAL_STREAM} for block, arm in formal_pairs(cfg)},
+            "outcome": "null_failure_hard_stop" if flags["hard_stop"] else "gain_half_clear_pending_pysr",
+            "verdicts": verdicts, "flags": flags, "not_run": list(FORMAL_NOT_RUN),
+            "claim": ("A null arm with a failure is a conclusive failure of the gate (hard stop). An arm without a gain-half "
+                      "failure is NOT passed: has_term needs PySR (verdict None)."),
+            "arms": arms, "cited_artifact_only_null": cited, "inputs": inputs, "timing_s": timing, "files": files,
+            "provenance": {"git_commit": head, "git_dirty": dirty, "config_sha256": _config_sha256(cfg),
+                           "code_sha256": hashlib.sha256(_SOURCE.read_bytes()).hexdigest()}}
+
+
+def formal_inputs(cfg, root, n_workers):
+    """Feature table of ALL training subjects of the primary split (check_training_side; test IDs never read) and the regime
+    grid for its exponent. The reference variant is pre-warmed on the loky pool (training IDs only) so the B4/B5 cache is the
+    one phase 1 reuses. Returns (table, grid, info, seconds)."""
+    import time
+    root = Path(root)
+    split = load_split(cfg, root)
+    train = sorted(split["train"])
+    check_training_side(train, split)
+    if set(train) & set(split["test"]):
+        raise GateError("training list overlaps the test list")
+    pilot_ids = pp.load_pilot_ids(cfg, root)
+    sens = cfg["statistics"]["sensitivity"]
+    ref = next(v for v in sens["variants"] if v["name"] == sens["reference_variant"])
+    t0 = time.perf_counter()
+    with pp.all_subjects_permitted():
+        pp.preprocess_variant(cfg, root, ref, train, allow_all=True, pilot_ids=pilot_ids, n_jobs=n_workers)
+        t1 = time.perf_counter()
+        table = build_feature_table(cfg, train, split, make_recording_loader(cfg, root, pilot_ids, allow_all=True))
+    t2 = time.perf_counter()
+    check_training_side(sorted({n.split("_")[0] for n in table.names}), split)
+    grid = build_grid(cfg, table.exponent, root / cfg["paths"]["cache_dir"] / cfg["g0"]["cache_subdir"], n_workers)
+    t3 = time.perf_counter()
+    info = {"n_training_subjects": len(train), "n_recordings": len(table.names), "n_skipped": len(table.skipped),
+            "skipped": [list(s) for s in table.skipped], "exponent": table.exponent, "target_sd_uv": table.target_sd_uv,
+            "names_sha256": hashlib.sha256("\n".join(table.names).encode("utf-8")).hexdigest(),
+            "features_sha256": hashlib.sha256(np.ascontiguousarray(table.features).tobytes()).hexdigest(),
+            "grid_key": grid.key, "grid_from_cache": bool(grid.from_cache), "n_valid_grid_points": int(grid.valid.sum()),
+            "table_source": "all_training"}
+    return table, grid, info, {"preprocess": t1 - t0, "feature_table": t2 - t1, "grid": t3 - t2}
+
+
+def formal_series(cfg, grid, table, round_):
+    """The 60 + 60 series: stream 'full', round `round_`, arms null_A and null_B only."""
+    gc = g0_cfg(cfg)
+    n = {"null_A": cfg["g0"]["n_null_A_full"], "null_B": cfg["g0"]["n_null_B_full"]}
+    out = {arm: [generate_series(gc, arm, i, grid, table, FORMAL_STREAM, round_) for i in range(n[arm])] for arm in FORMAL_ARMS}
+    for arm, lst in out.items():
+        if any(s.arm != arm or s.stream != FORMAL_STREAM for s in lst):
+            raise GateError("a formal series came from another arm or stream")
+    return out
+
+
+def run_formal_null_arms(cfg, root, n_jobs=None, estimate_only=False):
+    """K0 (IMP-094): the formal UKF-only null arms. Order: refusals, cite the pilot's artifact-only null, build the training
+    table and grid, generate the series, CLAIM the seeds in the ledger, evaluate 120 series (rule ON plus the flag-off
+    diagnostic), write results/g0_null_arms_r<round>.json (write-once) and, only on a null failure, outputs/gate.json, then
+    complete the ledger. Nothing is tuned; PySR is never imported."""
+    import datetime
+    import time
+    from joblib import Parallel, delayed
+    from src import tuning
+    root = Path(root)
+    if estimate_only:
+        return formal_estimate(cfg, root, n_jobs)
+    formal_preconditions(cfg, root)
+    n_workers = pool_size(cfg, n_jobs)
+    round_ = formal_round(cfg)
+    paths = formal_paths(cfg, root)
+    cited = cited_pilot_null(cfg, root)
+    t0 = time.perf_counter()
+    table, grid, inputs, t_inputs = formal_inputs(cfg, root, n_workers)
+    emit(f"== K0: training table {inputs['n_recordings']} recordings of {inputs['n_training_subjects']} subjects "
+         f"({inputs['n_skipped']} skipped), exponent {inputs['exponent']:.3f}, grid {inputs['grid_key'][:16]} "
+         f"(cache {inputs['grid_from_cache']}); {n_workers} workers ==")
+    series = formal_series(cfg, grid, table, round_)
+    t_gen = time.perf_counter() - t0 - sum(t_inputs.values())
+    q = float(g0_q(cfg, "A"))
+    head, dirty = tuning._git_state(root)
+    if head is None or dirty is None or dirty:
+        raise GateError("the git tree is not clean (or git is unavailable)")
+    pairs = formal_pairs(cfg)
+    ledger_claim(cfg, paths["ledger"], pairs, {
+        "commit": head, "config_sha256": _config_sha256(cfg),
+        "claimed_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "n_series": {a: len(series[a]) for a in FORMAL_ARMS}})
+    emit(f"ledger: claimed {pairs}; evaluating {sum(len(v) for v in series.values())} series at q {q:g}")
+    jobs = [(arm, ser) for arm in FORMAL_ARMS for ser in series[arm]]
+    t1 = time.perf_counter()
+    payloads = [(cfg, ser, "A", q) for _, ser in jobs]
+    if n_workers > 1:
+        results = Parallel(n_jobs=n_workers, backend=cfg["compute"]["joblib_backend"])(delayed(_series_worker)(p) for p in payloads)
+    else:
+        results = [_series_worker(p) for p in payloads]
+    eval_s = time.perf_counter() - t1
+    recs = {arm: [] for arm in FORMAL_ARMS}
+    for (arm, _), r in zip(jobs, results):
+        r["set"] = arm
+        recs[arm].append(r)
+    arms = {arm: formal_arm_report(cfg, arm, recs[arm]) for arm in FORMAL_ARMS}
+    verdicts = formal_verdicts(arms)
+    flags = gate_flags(False, verdicts)
+    files = {"results": paths["results"].relative_to(root).as_posix(),
+             "gate": paths["gate"].relative_to(root).as_posix() if flags["hard_stop"] else None,
+             "ledger": paths["ledger"].relative_to(root).as_posix()}
+    timing = {**t_inputs, "generate_series": t_gen, "evaluate": eval_s, "series_busy": float(sum(r["runtime_s"] for r in results))}
+    doc = build_formal_document(cfg, root, arms=arms, cited=cited, inputs=inputs, timing=timing, q=q, n_workers=n_workers, files=files)
+    write_once(paths["results"], doc)
+    res_sha = hashlib.sha256(paths["results"].read_bytes()).hexdigest()
+    if flags["hard_stop"]:
+        sections = {"null_A": null_arm_verdict(cfg, recs["null_A"]), "null_B": null_arm_verdict(cfg, recs["null_B"]),
+                    "preprocessing": {"null": cited}, "formal_results_file": files["results"], "formal_results_sha256": res_sha,
+                    "note": "UKF-only formal null arms (IMP-094); positive, contraction, stability and preprocessing bias not run"}
+        gdoc = build_gate_document(cfg, root, pilot=False, filter_name="A", verdicts=verdicts, sections=sections,
+                                   q={"q": q, "source": "q_fixed", "nis_rule_used": False},
+                                   seeds={arm: block for block, arm in pairs})
+        if paths["gate"].exists():
+            raise GateError(f"{paths['gate']} appeared during the run; not overwritten")
+        write_gate(cfg, root, gdoc, paths["gate"])
+    ledger_complete(cfg, paths["ledger"], pairs, {"result_sha256": res_sha, "outcome": doc["outcome"],
+                                                  "completed_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+    for line in format_formal(doc):
+        emit(line)
+    emit(f"written: {paths['results']}" + (f"; {paths['gate']}" if flags["hard_stop"] else "; no outputs/gate.json"))
+    return doc
+
+
+def format_formal(doc):
+    lines = [f"== K0 formal null arms (UKF-only, filter A, q {doc['q']:g}, delta {doc['delta']:.2f}); outcome {doc['outcome']} =="]
+    for arm, a in doc["arms"].items():
+        ro, fo = a["rule_on"], a["flag_off_diagnostic"]["counts"]
+        lines.append(f"{arm}: n {a['n']}; dropped {ro['dropped']}, outside delta {ro['outside_delta']}, inside delta "
+                     f"{ro['inside_delta']}; false positives {a['false_positives']}; upper bound 95% {a['upper_bound_95']:.4f}; "
+                     f"verdict {a['verdict']}; flag-off diagnostic: dropped {fo['dropped']}, outside {fo['outside_delta']}, "
+                     f"inside {fo['inside_delta']}")
+    c = doc["cited_artifact_only_null"]
+    lines.append(f"artifact-only null (cited, pilot, block {c['seed_block']} burnt): {c['n_fail']} of {c['n']} failed")
+    lines.append(f"would_hard_stop {doc['flags']['would_hard_stop']}, hard_stop {doc['flags']['hard_stop']}, complete "
+                 f"{doc['flags']['complete']}, not run {doc['not_run']}")
+    return lines
+
+
+def _time_one_cold_recording(cfg, root, edf, pilot_ids):
+    import time
+    from src import preprocess
+    t = time.perf_counter()
+    preprocess._variant_worker((cfg, edf, Path(root) / cfg["paths"]["data_dir"], Path(root) / cfg["paths"]["manifest_file"],
+                                frozenset(pilot_ids), True, False, False, Path(root) / cfg["paths"]["cache_dir"]))
+    return time.perf_counter() - t
+
+
+def formal_estimate(cfg, root, n_jobs=None):
+    """--estimate-only (IMP-094): the cost of the formal run, before it is spent. Times a few uncached non-pilot TRAINING
+    recordings (B4/B5 cold; they stay cached), the feature extraction of one cached recording, grid points, and one
+    generation plus both filter passes per arm on a PILOT-stream series (timing only, never scored, no ledger entry, block
+    92000 untouched). Writes no result. Above g0.formal.max_total_hours the estimate raises FormalStop."""
+    import dataclasses
+    import time
+    root = Path(root)
+    formal_preconditions(cfg, root, estimate_only=True)
+    fc = cfg["g0"]["formal"]
+    n_workers = pool_size(cfg, n_jobs)
+    split = load_split(cfg, root)
+    train = sorted(split["train"])
+    check_training_side(train, split)
+    pilot_ids = pp.load_pilot_ids(cfg, root)
+    nonpilot = [s for s in train if s not in pilot_ids]
+    files_np = pp.recording_files(cfg, root, nonpilot)
+    files_all = pp.recording_files(cfg, root, train)
+    k = int(fc["estimate_timing_recordings"])
+    pick = [files_np[int(round(i * (len(files_np) - 1) / max(1, k - 1)))] for i in range(k)]
+    with pp.all_subjects_permitted():
+        t_rec = [_time_one_cold_recording(cfg, root, f, pilot_ids) for f in pick]
+        t_pre = len(files_np) * float(np.mean(t_rec)) / n_workers
+        sample_subject = pick[0].name.split("_")[0]
+        loader = make_recording_loader(cfg, root, pilot_ids, allow_all=True)
+        t = time.perf_counter()
+        one = build_feature_table(cfg, [sample_subject], split, loader)
+        t_feat_one = (time.perf_counter() - t) / max(1, len(one.names))
+    t_table = t_feat_one * len(files_all)
+    table_p, grid_p = pilot_inputs(cfg, root)                              # cached pilot table and grid: TIMING ONLY
+    p_ax, sdf_ax, share_ax = axes(cfg)
+    n_pts = int(fc["estimate_timing_grid_points"])
+    idx = [int(round(i * (len(grid_p.features) - 1) / max(1, n_pts - 1))) for i in range(n_pts)]
+    t_pt = []
+    for i in idx:
+        ip, rem = divmod(i, len(sdf_ax) * len(share_ax))
+        isd, ins = divmod(rem, len(share_ax))
+        t = time.perf_counter()
+        grid_point_features(cfg, i, p_ax[ip], sdf_ax[isd], share_ax[ins], table_p.exponent)
+        t_pt.append(time.perf_counter() - t)
+    t = time.perf_counter()
+    classify_regime(cfg, p_ax[0])
+    t_cls = (time.perf_counter() - t) * len(p_ax)
+    t_grid = len(grid_p.features) * float(np.mean(t_pt)) / n_workers + t_cls
+    gc = g0_cfg(cfg)
+    q = float(g0_q(cfg, "A"))
+    gen, expect = {}, {}
+    sidx = int(fc["estimate_series_index"])
+    for arm in FORMAL_ARMS:
+        t = time.perf_counter()
+        ser = generate_series(gc, arm, sidx, grid_p, table_p, "pilot")
+        gen[arm] = time.perf_counter() - t
+        if arm == FORMAL_ARMS[0]:
+            n_warm = int(round(cfg["g0"]["pilot"]["timing_warmup_s"] * cfg["preprocessing"]["observation_fs_hz"]))
+            short = dataclasses.replace(ser, segments=[ser.segments[0][:, :n_warm]], starts=[ser.starts[0]], truth=None)
+            evaluate_series(cfg, short, "A", q, want_pass2=True, diagnostic=False)
+        expect[arm] = time_series_passes(cfg, ser, "A", q)
+    n_a, n_b = cfg["g0"]["n_null_A_full"], cfg["g0"]["n_null_B_full"]
+    t_gen = n_a * gen["null_A"] + n_b * gen["null_B"]
+    t_eval = (n_a * expect["null_A"]["expected_s"] + n_b * expect["null_B"]["expected_s"]) / n_workers
+    t_eval_bound = (n_a * expect["null_A"]["bound_s"] + n_b * expect["null_B"]["bound_s"]) / n_workers
+    total = t_pre + t_table + t_grid + t_gen + t_eval
+    bound = t_pre + t_table + t_grid + t_gen + t_eval_bound
+    est = {"n_workers": n_workers, "n_training_recordings": len(files_all), "n_nonpilot_recordings_assumed_cold": len(files_np),
+           "cold_recording_s": t_rec, "preprocess_s": t_pre, "feature_table_s": t_table, "grid_s": t_grid,
+           "grid_point_s": t_pt, "generate_series_s": t_gen, "evaluate_s": t_eval, "evaluate_bound_s": t_eval_bound,
+           "total_s": total, "total_h": total / 3600.0, "bound_h": bound / 3600.0, "limit_h": fc["max_total_hours"],
+           "series_timing": expect, "note": "series timed on pilot-stream series with the pilot table (timing only)"}
+    emit("== K0 estimate (nothing scored, no ledger entry, block 92000 untouched) ==")
+    emit(f"{len(files_all)} training recordings ({len(files_np)} non-pilot assumed cold); cold B4/B5 times of {k} sampled: "
+         + ", ".join(f"{v:.1f}s" for v in t_rec) + f" -> preprocessing {t_pre / 60:.1f} min on {n_workers} workers")
+    emit(f"feature table {t_table / 60:.1f} min; regime grid ({len(grid_p.features)} points, {np.mean(t_pt):.1f} s each) "
+         f"{t_grid / 60:.1f} min; generation of {n_a + n_b} series {t_gen / 60:.1f} min; evaluation {t_eval / 60:.1f} min "
+         f"(bound {t_eval_bound / 60:.1f})")
+    emit(f"TOTAL {total / 3600:.2f} h (conservative bound {bound / 3600:.2f} h); limit {fc['max_total_hours']} h")
+    if bound / 3600.0 > fc["max_total_hours"]:
+        raise FormalStop(f"estimate {bound / 3600:.2f} h exceeds the {fc['max_total_hours']} h limit: stopping to ask "
+                         f"(no fall back to the pilot table)")
+    return {"estimate": est}
+
+
 # ---------------------------------------------------------------- the E1 report
 
 def grid_report(cfg, root, pilot, n_jobs=None):
@@ -1898,6 +2369,7 @@ def main(argv=None):
     ap.add_argument("--pilot", action="store_true")
     ap.add_argument("--estimate-only", action="store_true", help="E5: time one series per option, print the estimate, stop")
     ap.add_argument("--n-jobs", type=int, default=None)
+    ap.add_argument("--g0-null-arms", action="store_true", help="K0 (IMP-094): the formal UKF-only null arms (add --estimate-only first)")
     args = ap.parse_args(argv)
     cfg = load_config()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -1913,6 +2385,18 @@ def main(argv=None):
         if not args.pilot:
             raise GateError("the timing run is wired for --pilot only")
         time_gate_series(cfg, REPO_ROOT)
+        return 0
+    if args.g0_null_arms:
+        if args.pilot:
+            ap.error("--g0-null-arms is the formal run and cannot be combined with --pilot")
+        try:
+            run_formal_null_arms(cfg, REPO_ROOT, args.n_jobs, args.estimate_only)
+        except FormalStop as e:
+            emit(f"STOP: {e}")
+            return 3
+        except GateError as e:
+            emit(f"REFUSED: {e}")
+            return 2
         return 0
     if args.pilot:
         try:

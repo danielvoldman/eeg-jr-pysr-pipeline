@@ -406,11 +406,12 @@ def gate_state(cfg, root, pilot):
     and its hard_stop and low_confidence flags (None when unknown)."""
     from src import passes, synthetic_gate
     path = synthetic_gate.gate_path(cfg, root, pilot, passes.resolve_filter(cfg))
-    state = {"path": path, "exists": path.is_file(), "hard_stop": None, "low_confidence": None}
+    state = {"path": path, "exists": path.is_file(), "hard_stop": None, "low_confidence": None, "complete": None}
     if state["exists"]:
         doc = json.loads(path.read_text(encoding="utf-8"))
         state["hard_stop"] = None if doc.get("hard_stop") is None else bool(doc["hard_stop"])
         state["low_confidence"] = None if doc.get("low_confidence") is None else bool(doc["low_confidence"])
+        state["complete"] = None if doc.get("complete") is None else bool(doc["complete"])
     return state
 
 
@@ -426,6 +427,8 @@ def check_phase_gate(cfg, root, phase, pilot):
             return f"gate file {g['path']} not found (CLAUDE.md rule 6)", None
         if g["hard_stop"] is not False:
             return f"gate file {g['path']} records a hard stop (or none was recorded)", g["low_confidence"]
+        if g["complete"] is False:
+            return f"gate file {g['path']} is incomplete (complete false, IMP-094)", g["low_confidence"]
     return None, g["low_confidence"]
 
 
@@ -478,6 +481,7 @@ class Step:
     outputs: list                  # the files whose existence marks the step as done
     run: object                    # run(force: bool) -> None
     always: bool = False           # a derived step (the summary): rerun on every call
+    verify: object = None          # verify() -> None, raises PhaseError; called after the step ran AND when it was skipped
 
 
 def stale_reason(path, cfg, root):
@@ -531,10 +535,14 @@ def run_steps(steps, cfg, root, pilot, force):
                     log.warning("step %s: %s (the output is reused; --force recomputes it)", st.name, d)
                 RUN_STATE["steps"][st.name] = {"status": "skipped", "seconds": 0.0, "drift": sorted(set(drift))}
                 log.info("step %s: up to date, skipped", st.name)
+                if st.verify is not None:
+                    st.verify()
                 continue
             log.info("step %s: running%s", st.name, " (--force)" if force and existing else "")
             st.run(force)
             RUN_STATE["steps"][st.name] = {"status": "ran", "seconds": time.monotonic() - t0, "drift": []}
+            if st.verify is not None:
+                st.verify()
 
 
 def _seeds(cfg, pilot):
@@ -581,8 +589,17 @@ def phase1_steps(cfg, root, pilot):
         steps.append(Step("g0_pilot", [gate], lambda force: synthetic_gate.run_pilot(cfg, root, options=[fname])))
     else:
         def g0_full(force):
-            raise NotBuilt("the full G0 driver (PLAN Stage K, phase 1) is not built; gate.json cannot be written")
-        steps.append(Step("g0", [root / cfg["paths"]["gate_file"]], g0_full))
+            raise NotBuilt("the full G0 driver (PLAN Stage K, phase 1) is not built; gate.json cannot be written (the UKF-only "
+                           "null arms run standalone: python -m src.synthetic_gate --g0-null-arms, IMP-094)")
+
+        def g0_verify():
+            """A hard-stop or incomplete gate fails the step, whether it just ran or was skipped (§18.1, IMP-094)."""
+            g = gate_state(cfg, root, False)
+            if g["hard_stop"] is not False:
+                raise PhaseError(f"gate file {g['path']} records a hard stop (or none was recorded): phase 1 writes no flag (§18.1)")
+            if g["complete"] is False:
+                raise PhaseError(f"gate file {g['path']} is incomplete (complete false): phase 1 writes no flag (IMP-094)")
+        steps.append(Step("g0", [root / cfg["paths"]["gate_file"]], g0_full, verify=g0_verify))
     return steps
 
 

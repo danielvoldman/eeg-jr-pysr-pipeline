@@ -298,6 +298,8 @@ def check_gate(cfg, root):
     gate = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(gate, dict) and gate.get("hard_stop") is True:
         raise GateError(f"{path} records a hard stop: real-data Q/R tuning is not permitted")
+    if isinstance(gate, dict) and gate.get("complete") is False:
+        raise GateError(f"{path} is incomplete (complete false: checks not run or pending): real-data fitting is not permitted (IMP-094)")
     return gate
 
 

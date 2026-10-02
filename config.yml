@@ -527,6 +527,19 @@ g0:
     output_file: {value: "rule_selection.json", prov: placeholder, ref: "IMP-091", note: "under paths.pilot_results_dir; write-once"}
     schema_version: {value: 1, prov: placeholder, ref: "IMP-091"}
 
+  formal:
+    round: {value: 0, prov: placeholder, ref: "IMP-094", note: "fresh-seed round of the formal null arms (0 = the blocks of g0.seeds as they stand)"}
+    null_arms_file: {value: "g0_null_arms_r{round}.json", prov: placeholder, ref: "IMP-094", note: "under paths.results_dir; written once, atomically, always"}
+    ledger_file: {value: "g0_seed_ledger.json", prov: placeholder, ref: "IMP-094", note: "under paths.results_dir; append-only, keyed by (effective block, arm)"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-094"}
+    delta_expected: {value: 1.08, prov: locked, ref: "IMP-094, §9.2", note: "delta stays half the weakest planted level (owner decision 2026-10-02); the driver refuses any other value"}
+    max_total_hours: {value: 1.0, prov: placeholder, ref: "IMP-094", note: "the estimate (preprocessing + grid + series) above this stops the run and asks; no fall back to the pilot table"}
+    estimate_timing_recordings: {value: 3, prov: placeholder, ref: "IMP-094", note: "uncached non-pilot TRAINING recordings preprocessed cold to time B4/B5 in --estimate-only"}
+    estimate_timing_grid_points: {value: 2, prov: placeholder, ref: "IMP-094", note: "grid points simulated to time the regime grid in --estimate-only"}
+    estimate_series_index: {value: 2, prov: placeholder, ref: "IMP-094", note: "pilot-stream series (timing only, never scored) used to time generation and the filter passes"}
+    cited_pilot_gate_file: {value: "gate_A.json", prov: placeholder, ref: "IMP-094", note: "under paths.pilot_results_dir; its artifact-only null (block 94000, burnt) is cited in the formal document"}
+    burnt_blocks: {value: [{block: 91000, arm: "*", reason: "pilot G0 series (E5)"}, {block: 93000, arm: "*", reason: "G0 tuning set (E5)"}, {block: 94000, arm: "*", reason: "pilot preprocessing-gate set (20 positive, 20 artifact-only null), scored in the pilot; IMP-094"}, {block: 96000, arm: "*", reason: "F2 divergence-rule selection test (IMP-092)"}, {block: 99000, arm: "*", reason: "F2 exploratory block"}, {block: 99500, arm: "*", reason: "F2 smoke block"}], prov: placeholder, ref: "IMP-094, IMP-092, IMP-093", note: "entered into the ledger at creation; arm '*' = every arm of the block"}
+
 # ---------------------------------------------------------------- split, subjects, seeds (§11, §17)
 split:
   primary_seed: {value: 42, prov: locked, ref: "§11.1"}
