@@ -528,7 +528,8 @@ g0:
     schema_version: {value: 1, prov: placeholder, ref: "IMP-091"}
 
   formal:
-    round: {value: 0, prov: placeholder, ref: "IMP-094", note: "fresh-seed round of the formal null arms (0 = the blocks of g0.seeds as they stand)"}
+    round: {value: 1, prov: placeholder, ref: "IMP-094, IMP-097", note: "fresh-seed round of the formal null arms: round 0 (block 92000) was lost and is burnt (IMP-096); round 1 = block 102000"}
+    checkpoint_dir_pattern: {value: "g0_null_arms_r{round}.partial", prov: placeholder, ref: "IMP-097", note: "under paths.results_dir; one atomic record per series plus _header.json; resume only with matching seeds, code fingerprint and config hash"}
     null_arms_file: {value: "g0_null_arms_r{round}.json", prov: placeholder, ref: "IMP-094", note: "under paths.results_dir; written once, atomically, always"}
     ledger_file: {value: "g0_seed_ledger.json", prov: placeholder, ref: "IMP-094", note: "under paths.results_dir; append-only, keyed by (effective block, arm)"}
     schema_version: {value: 1, prov: placeholder, ref: "IMP-094"}
@@ -538,7 +539,7 @@ g0:
     estimate_timing_grid_points: {value: 2, prov: placeholder, ref: "IMP-094", note: "grid points simulated to time the regime grid in --estimate-only"}
     estimate_series_index: {value: 2, prov: placeholder, ref: "IMP-094", note: "pilot-stream series (timing only, never scored) used to time generation and the filter passes"}
     cited_pilot_gate_file: {value: "gate_A.json", prov: placeholder, ref: "IMP-094", note: "under paths.pilot_results_dir; its artifact-only null (block 94000, burnt) is cited in the formal document"}
-    burnt_blocks: {value: [{block: 91000, arm: "*", reason: "pilot G0 series (E5)"}, {block: 93000, arm: "*", reason: "G0 tuning set (E5)"}, {block: 94000, arm: "*", reason: "pilot preprocessing-gate set (20 positive, 20 artifact-only null), scored in the pilot; IMP-094"}, {block: 96000, arm: "*", reason: "F2 divergence-rule selection test (IMP-092)"}, {block: 99000, arm: "*", reason: "F2 exploratory block"}, {block: 99500, arm: "*", reason: "F2 smoke block"}], prov: placeholder, ref: "IMP-094, IMP-092, IMP-093", note: "entered into the ledger at creation; arm '*' = every arm of the block"}
+    burnt_blocks: {value: [{block: 91000, arm: "*", reason: "pilot G0 series (E5)"}, {block: 93000, arm: "*", reason: "G0 tuning set (E5)"}, {block: 94000, arm: "*", reason: "pilot preprocessing-gate set (20 positive, 20 artifact-only null), scored in the pilot; IMP-094"}, {block: 92000, arm: "null_A", reason: "formal round 0 killed by an operator timeout during evaluation, no result seen (IMP-096, IMP-097)"}, {block: 92000, arm: "null_B", reason: "formal round 0 killed by an operator timeout during evaluation, no result seen (IMP-096, IMP-097)"}, {block: 96000, arm: "*", reason: "F2 divergence-rule selection test (IMP-092)"}, {block: 99000, arm: "*", reason: "F2 exploratory block"}, {block: 99500, arm: "*", reason: "F2 smoke block"}], prov: placeholder, ref: "IMP-094, IMP-092, IMP-093", note: "entered into the ledger at creation; arm '*' = every arm of the block"}
 
 # ---------------------------------------------------------------- split, subjects, seeds (§11, §17)
 split:

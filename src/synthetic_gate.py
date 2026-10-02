@@ -1864,7 +1864,8 @@ def formal_paths(cfg, root):
     root, fc = Path(root), cfg["g0"]["formal"]
     res = root / cfg["paths"]["results_dir"]
     return {"results": res / fc["null_arms_file"].format(round=formal_round(cfg)), "ledger": res / fc["ledger_file"],
-            "gate": root / cfg["paths"]["gate_file"]}
+            "gate": root / cfg["paths"]["gate_file"],
+            "partial": res / fc["checkpoint_dir_pattern"].format(round=formal_round(cfg))}
 
 
 def formal_pairs(cfg):
@@ -1946,7 +1947,94 @@ def ledger_complete(cfg, path, pairs, info):
     _write_json_atomic(path, {"schema_version": cfg["g0"]["formal"]["schema_version"], "entries": entries})
 
 
-def formal_preconditions(cfg, root, estimate_only=False):
+HEADER_NAME = "_header.json"
+
+
+def code_fingerprint():
+    """sha256 over every src/*.py (name and bytes): what a resumed run must still be running."""
+    h = hashlib.sha256()
+    for f in sorted(_SOURCE.parent.glob("*.py")):
+        h.update(f.name.encode("utf-8"))
+        h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+def _np_default(o):
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    raise TypeError(f"not JSON serialisable: {type(o)}")
+
+
+def normalize_record(rec):
+    """A record as it is read back from disk (finite floats round-trip exactly; inf and nan as JSON Infinity / NaN). Every
+    record is used in this form, fresh or resumed, so a resume cannot change a result."""
+    return json.loads(json.dumps(rec, default=_np_default))
+
+
+def checkpoint_path(pdir, arm, index):
+    return Path(pdir) / f"{arm}_{int(index):03d}.json"
+
+
+def write_checkpoint(pdir, arm, index, rec):
+    """One series record, atomically (temporary file then replace); returns the normalised record."""
+    path = checkpoint_path(pdir, arm, index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(rec, default=_np_default, sort_keys=True), encoding="utf-8", newline="\n")
+    tmp.replace(path)
+    return normalize_record(rec)
+
+
+def read_checkpoint(pdir, arm, index):
+    path = checkpoint_path(pdir, arm, index)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise GateError(f"{path.name} is not valid JSON (an interrupted write cannot leave this: atomic replace)") from exc
+
+
+def formal_header(cfg, pairs, q, counts, head):
+    return {"schema_version": 1, "code_fingerprint": code_fingerprint(), "config_sha256": _config_sha256(cfg),
+            "pairs": [[int(b), a] for b, a in pairs], "n_series": dict(counts), "q": float(q), "filter": "A", "git_commit": head}
+
+
+def formal_resume(cfg, root):
+    """None for a fresh run, else the header of the run to RESUME. Resume needs the partial folder with a header, the ledger
+    entries of both pairs 'started' (burnt or completed refuse), and header seeds, code fingerprint and config hash equal to the
+    current ones (IMP-097). A header with no ledger entry is a crash before the claim: fresh."""
+    paths = formal_paths(cfg, root)
+    hp = paths["partial"] / HEADER_NAME
+    if not hp.is_file():
+        return None
+    header = json.loads(hp.read_text(encoding="utf-8"))
+    entries = ledger_entries(cfg, paths["ledger"])
+    pairs = formal_pairs(cfg)
+    found = [entries.get(f"{b}:{a}") for b, a in pairs]
+    if all(e is None for e in found):
+        return None
+    for (b, a), e in zip(pairs, found):
+        if e is None or e["status"] != "started":
+            raise GateError(f"resume refused: ledger entry {b}:{a} is {None if e is None else e['status']}, not started")
+    if header["pairs"] != [[int(b), a] for b, a in pairs]:
+        raise GateError("resume refused: the seed blocks differ from the checkpoint header")
+    if header["code_fingerprint"] != code_fingerprint():
+        raise GateError("resume refused: the code (src/*.py) differs from the checkpoint header")
+    if header["config_sha256"] != _config_sha256(cfg):
+        raise GateError("resume refused: the configuration differs from the checkpoint header")
+    return header
+
+
+def _checkpointed_worker(payload):
+    """Top-level (Windows spawn): one series through the filter, its record written atomically before it is returned."""
+    cfg, ser, name, q, pdir = payload
+    return write_checkpoint(pdir, ser.arm, ser.index, _series_worker((cfg, ser, name, q)))
+
+
+def formal_preconditions(cfg, root, estimate_only=False, resume=False):
     """Every refusal of the formal run (IMP-094 (8)), collected and raised together. The estimate needs the configuration
     checks only; the run also needs a clean git tree, free seeds and no existing result or gate file."""
     from src import tuning
@@ -1981,11 +2069,14 @@ def formal_preconditions(cfg, root, estimate_only=False):
             problems.append(f"{paths['results'].name} exists")
         if paths["gate"].exists():
             problems.append(f"{paths['gate'].name} exists: a gate file already stands")
-        entries = ledger_entries(cfg, paths["ledger"])
-        for block, arm in formal_pairs(cfg):
-            hit = ledger_blocked(entries, block, arm)
-            if hit is not None:
-                problems.append(f"seed block {block} arm {arm} is already {hit[1]['status']}")
+        if not resume:                       # a resume is the same run: its own 'started' entries are not a refusal
+            entries = ledger_entries(cfg, paths["ledger"])
+            for block, arm in formal_pairs(cfg):
+                hit = ledger_blocked(entries, block, arm)
+                if hit is not None:
+                    problems.append(f"seed block {block} arm {arm} is already {hit[1]['status']}")
+            if any(f.name != HEADER_NAME for f in paths["partial"].glob("*.json")):
+                problems.append(f"{paths['partial'].name} holds records but no valid claim")
     if problems:
         raise GateError("formal null arms refused: " + "; ".join(problems))
 
@@ -2139,7 +2230,9 @@ def run_formal_null_arms(cfg, root, n_jobs=None, estimate_only=False):
     root = Path(root)
     if estimate_only:
         return formal_estimate(cfg, root, n_jobs)
-    formal_preconditions(cfg, root)
+    resume_header = formal_resume(cfg, root)
+    resume = resume_header is not None
+    formal_preconditions(cfg, root, resume=resume)
     n_workers = pool_size(cfg, n_jobs)
     round_ = formal_round(cfg)
     paths = formal_paths(cfg, root)
@@ -2156,30 +2249,57 @@ def run_formal_null_arms(cfg, root, n_jobs=None, estimate_only=False):
     if head is None or dirty is None or dirty:
         raise GateError("the git tree is not clean (or git is unavailable)")
     pairs = formal_pairs(cfg)
-    ledger_claim(cfg, paths["ledger"], pairs, {
-        "commit": head, "config_sha256": _config_sha256(cfg),
-        "claimed_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "n_series": {a: len(series[a]) for a in FORMAL_ARMS}})
-    emit(f"ledger: claimed {pairs}; evaluating {sum(len(v) for v in series.values())} series at q {q:g}")
-    jobs = [(arm, ser) for arm in FORMAL_ARMS for ser in series[arm]]
-    t1 = time.perf_counter()
-    payloads = [(cfg, ser, "A", q) for _, ser in jobs]
-    if n_workers > 1:
-        results = Parallel(n_jobs=n_workers, backend=cfg["compute"]["joblib_backend"])(delayed(_series_worker)(p) for p in payloads)
+    pdir = paths["partial"]
+    counts = {a: len(series[a]) for a in FORMAL_ARMS}
+    if resume:
+        done = set()
+        for a in FORMAL_ARMS:
+            for s in series[a]:
+                r = read_checkpoint(pdir, a, s.index)
+                if r is None:
+                    continue
+                if r.get("data_sha256") != series_digest(s):
+                    raise GateError(f"resume refused: the data of {a} series {s.index} differ from its checkpoint")
+                done.add((a, s.index))
+        emit(f"RESUME: {len(done)} of {sum(counts.values())} series already have a record; ledger entries stay started")
     else:
-        results = [_series_worker(p) for p in payloads]
+        pdir.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(pdir / HEADER_NAME, formal_header(cfg, pairs, q, counts, head))      # BEFORE the claim
+        ledger_claim(cfg, paths["ledger"], pairs, {
+            "commit": head, "config_sha256": _config_sha256(cfg),
+            "claimed_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "n_series": counts})
+        done = set()
+        emit(f"ledger: claimed {pairs}")
+    jobs = [(arm, ser) for arm in FORMAL_ARMS for ser in series[arm] if (arm, ser.index) not in done]
+    emit(f"evaluating {len(jobs)} series at q {q:g} (checkpoints in {pdir.name})")
+    t1 = time.perf_counter()
+    payloads = [(cfg, ser, "A", q, str(pdir)) for _, ser in jobs]
+    if n_workers > 1 and payloads:
+        stream = Parallel(n_jobs=n_workers, backend=cfg["compute"]["joblib_backend"], return_as="generator_unordered")(
+            delayed(_checkpointed_worker)(p) for p in payloads)
+    else:
+        stream = (_checkpointed_worker(p) for p in payloads)
+    for k, _r in enumerate(stream, 1):
+        if k % 10 == 0 or k == len(payloads):
+            emit(f"progress: {k} of {len(payloads)} series done ({(time.perf_counter() - t1) / 60:.1f} min)")
     eval_s = time.perf_counter() - t1
     recs = {arm: [] for arm in FORMAL_ARMS}
-    for (arm, _), r in zip(jobs, results):
-        r["set"] = arm
-        recs[arm].append(r)
+    for arm in FORMAL_ARMS:                                  # canonical order, always from the files
+        for ser in series[arm]:
+            r = read_checkpoint(pdir, arm, ser.index)
+            if r is None:
+                raise GateError(f"{arm} series {ser.index} has no record after the evaluation")
+            r["set"] = arm
+            recs[arm].append(r)
+    results = [r for arm in FORMAL_ARMS for r in recs[arm]]
     arms = {arm: formal_arm_report(cfg, arm, recs[arm]) for arm in FORMAL_ARMS}
     verdicts = formal_verdicts(arms)
     flags = gate_flags(False, verdicts)
     files = {"results": paths["results"].relative_to(root).as_posix(),
              "gate": paths["gate"].relative_to(root).as_posix() if flags["hard_stop"] else None,
              "ledger": paths["ledger"].relative_to(root).as_posix()}
-    timing = {**t_inputs, "generate_series": t_gen, "evaluate": eval_s, "series_busy": float(sum(r["runtime_s"] for r in results))}
+    timing = {**t_inputs, "generate_series": t_gen, "evaluate": eval_s, "series_busy": float(sum(r["runtime_s"] for r in results)),
+              "resumed": resume, "n_evaluated_this_session": len(jobs)}
     doc = build_formal_document(cfg, root, arms=arms, cited=cited, inputs=inputs, timing=timing, q=q, n_workers=n_workers, files=files)
     write_once(paths["results"], doc)
     res_sha = hashlib.sha256(paths["results"].read_bytes()).hexdigest()
@@ -2389,6 +2509,9 @@ def main(argv=None):
     if args.g0_null_arms:
         if args.pilot:
             ap.error("--g0-null-arms is the formal run and cannot be combined with --pilot")
+        if sys.platform == "win32" and not args.estimate_only:          # no sleep while the run lives (IMP-097); power plan untouched
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
         try:
             run_formal_null_arms(cfg, REPO_ROOT, args.n_jobs, args.estimate_only)
         except FormalStop as e:
