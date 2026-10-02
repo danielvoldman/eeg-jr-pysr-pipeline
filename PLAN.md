@@ -469,7 +469,7 @@ Done when:
 
 Note (2026-10-01, merged G2 stage; IMP-081): done in robustness.py: ICC(3,1) per direction (g12, g21), F-based CI, F-test p, cluster-bootstrap CI (whole pairs, B 10,000, pilot 100), vigilance-adjusted ICC (pooled regression with intercept, stored B5 vigilance), all pairs and test-partition pairs, the unadjusted-ICC verdict, the observed ICC equal to a CI lower bound of 0.40 (about 0.63 at n = 42), pair rules with listed exclusions, the pilot-only guard (resolve_c3_subjects), results/pilot/c3_42.json. The section 11.3 estimator (frozen base + residual) is wired through the G0.5 NumPy filter. NOT done: no frozen equation exists, so the pilot file uses the M2 stand-in and makes no verdict (mechanics only); the test-partition ICC and the confirmatory run have not been run. Pilot real data: 2 usable pairs of the 4 pilot subjects with a second session (sub-051 ses-t2 has too little clean data; sub-074 ses-t1 diverged), so the ICC numbers mean nothing. Box left open ([~]) for that reason.
 
-### [ ] G5. C4 free-run
+### [~] G5. C4 free-run (machinery done and run on pilot data; no verdict can exist yet)
 Read: §10.2, §15.
 Done when:
 - The free-run is stochastic, with 20 realizations.
@@ -477,6 +477,8 @@ Done when:
 - Errors are computed per segment.
 - The upper CI bound of the ratio must be ≤ 1.20.
 - The scoring condition is checked.
+
+Note (2026-10-01; IMP-086): src/freerun.py (batched stochastic free-run with per-realization rings, 20 realizations, Welch 2-s Hann on the 0.5-Hz grid over 1 to 45 Hz, per-segment errors, window plan), robustness.run_c4 and the c4_* statistics (stability, the 80% condition, the ratio of subject means with a bootstrap on the ratio, upper bound 97.5th percentile against 1.20, the M3-minus-M2 contrast for the three Holm members), the additive capture hooks (passes.run_pass1 capture_idx, ukf_resid pots_snap; golden tests unchanged), IMP-084 implemented (holm_members and holm_report take c4_attempted; the family is 8 when C4 is not attempted). tests/test_freerun.py (47 tests), 31 mutation checks. Pilot real data (12 recordings, M2 stand-in, q_fixed = 1e-2, 111 s on 4 workers): 6 recordings have a diverged pass 1, and of the 6 that remain NONE is stable at every length: 7 to 70 percent of the 2-s windows and 50 to 95 percent of the 10-s windows are unstable (any of 20 realizations leaves 10 SD), so the stability condition is 0 of 12 against 80 percent and C4 would be 'not attempted' even with a passing G0. On synthetic data the same code is stable at q = 1e-3 and 1e-4 and unstable at 1e-2. NOT done, so the box is [~]: there is no frozen equation (M3 free-run never run on real data, the three Holm p do not exist) and the confirmatory run has not been run.
 
 ### [x] G6. Diagnostics
 Read: §14.

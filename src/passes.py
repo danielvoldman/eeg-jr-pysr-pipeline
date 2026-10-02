@@ -170,6 +170,7 @@ class SegmentPass1:
     nis_keep: object = None          # (n,) bool: samples after both burn-ins (the C4 tuning samples)
     z_pred: object = None            # (n, 2) one-step-ahead predicted observation, rescaled units (F0); None if diverged
     sq_err: object = None            # (n,) one-step squared error averaged over the two channels (F0); None if diverged
+    captured: object = None          # {t0: {"x", "ring", "pots"}} filtered state before sample t0 (C4 free-run, IMP-086)
 
 
 @dataclass
@@ -231,7 +232,8 @@ class RecordingResult:
 
 # ---- pass 1 -----------------------------------------------------------------------------------------
 
-def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, filter_name=None, spec=None, residual=None):
+def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, filter_name=None, spec=None, residual=None,
+              capture_idx=None):
     """Recording-level pass over the clean segments (§7.5). See the module docstring and IMP-030/031.
 
     filter_name / q: explicit, else config (g0.filter, ukf.process_noise.q_fixed); see resolve_filter, resolve_q. `spec`
@@ -242,7 +244,12 @@ def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, fi
     of samples after both burn-ins. The default is unchanged.
 
     residual (M3, G0.5, IMP-077): a state_space.ResidualHook added to dy4/dt inside the prediction; forward_only only,
-    because the NumPy filter that carries it has no smoother."""
+    because the NumPy filter that carries it has no smoother.
+
+    capture_idx (C4 free-run, IMP-086; additive, None changes nothing): one iterable of sample indices t0 per segment. For
+    every non-diverged segment, SegmentPass1.captured[t0] holds the FILTERED state before sample t0, i.e. after sample
+    t0 - 1: "x" the full state (neural, parameters, noise states), "ring" the S delay ring (lag-indexed, (delay + 1, 2)) and
+    "pots" the potential ring of the M3 residual filter (None without a residual)."""
     _check_inputs(segments, starts)
     if residual is not None and not forward_only:
         raise PassError("a residual run is forward-only (the filter that carries the residual has no smoother)")
@@ -305,6 +312,17 @@ def run_pass1(segments, starts, cfg, q=None, layout=None, forward_only=False, fi
         if getattr(res, "z_pred", None) is not None:        # stub filters of some tests carry no prediction
             seg_res.z_pred = np.array(res.z_pred[:T], dtype=np.float64)
             seg_res.sq_err = np.mean((z - seg_res.z_pred) ** 2, axis=1)
+        if capture_idx is not None:
+            full = getattr(res, "full", res)
+            pots_snap = getattr(full, "pots_snap", None)
+            seg_res.captured = {}
+            for t0 in capture_idx[k]:
+                t0 = int(t0)
+                if not 1 <= t0 < T:
+                    raise PassError(f"capture index {t0} is outside 1..{T - 1} of segment {k}")
+                seg_res.captured[t0] = {"x": np.array(full.x[t0 - 1], dtype=np.float64),
+                                        "ring": np.array(res.snapshots[t0], dtype=np.float64),
+                                        "pots": None if pots_snap is None else np.array(pots_snap[t0], dtype=np.float64)}
         carry_x = res.x[-1, n_neural:].copy()
         carry_P = (res.P_last if forward_only else res.P[-1])[n_neural:, n_neural:].copy()
         seg_res.carry_out_mean, seg_res.carry_out_var = carry_x.copy(), np.diag(carry_P).copy()

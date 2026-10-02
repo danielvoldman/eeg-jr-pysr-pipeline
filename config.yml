@@ -327,6 +327,8 @@ windows:
     freq_range_hz: {value: [1, 45], prov: locked, ref: "§10.2"}
     min_stable_fraction: {value: 0.80, prov: locked, ref: "§10.2"}
     ratio_upper_ci_max: {value: 1.20, prov: placeholder, ref: "§15.1"}
+    seed: {value: 42, prov: placeholder, ref: "§10.2, IMP-086", note: "free-run rng = default_rng([seed, subject index in the sorted plan IDs, window length in s, window index]); M2 and M3 share the streams (common random numbers)"}
+    recording_unstable_window_fraction: {value: 0.10, prov: placeholder, ref: "§10.2, IMP-086", note: "a recording is unstable at a window length if MORE than this share of its windows is unstable (a window is unstable if ANY of its 20 realizations diverges); a recording whose pass 1 diverged counts as unstable"}
 
 # ---------------------------------------------------------------- residual target (§8.3)
 residual:
@@ -553,6 +555,7 @@ statistics:
   icc_form: {value: "ICC(3,1) consistency", prov: locked, ref: "§11.3"}
   icc_ci_method: {value: "F-based", prov: placeholder, ref: "§14"}
   holm_family_size: {value: 11, prov: placeholder, ref: "§14, §15.2, IMP-080", note: "decided 2026-10-01 (Daniel Voldman): every test of the four §15.2 bullets counts, bullet 4 over the 4 non-primary split seeds: 2 (C1 M0->M1, M1->M2) + 3 (free-run per scoring window 2/5/10 s) + 2 (test-partition ICC, g12 and g21) + 4 = 11; departs from the four-bullets wording of §14; checked against the member registry (robustness.holm_members)"}
+  holm_family_size_without_freerun: {value: 8, prov: placeholder, ref: "§15.2, IMP-084, IMP-086", note: "the family size when C4 is 'not attempted' (the three free-run members get no p): 2 C1 steps + 2 test-partition ICC + 4 seed members; holm_family_size stays 11 when C4 is attempted; the choice is made once, from the C4 condition, before any adjustment"}
   wpli_bands_hz: {value: [[8, 13], [1, 45]], prov: placeholder, ref: "§14"}
   c3:
     output_pattern: {value: "c3_{seed}.json", prov: placeholder, ref: "§18.1, IMP-081", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
@@ -583,6 +586,10 @@ statistics:
     output_pattern: {value: "c2_{seed}.json", prov: placeholder, ref: "§18.1, IMP-085", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
     schema_version: {value: 1, prov: placeholder, ref: "IMP-085"}
     ensemble_seed: {value: 42, prov: locked, ref: "§8.2, §11.1, IMP-085", note: "the refit ensemble runs on the primary split seed only"}
+  c4:
+    output_pattern: {value: "c4_{seed}.json", prov: placeholder, ref: "§18.1, IMP-086", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
+    cache_subdir: {value: "c4_freerun", prov: placeholder, ref: "§18.1, IMP-086", note: "per-recording window errors under paths.cache_dir"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-086"}
   criteria:
     c2_signature_recurrence_min: {value: 0.70, prov: placeholder, ref: "§15.1"}
     c2_min_seeds_passing_c1: {value: 4, prov: locked, ref: "§15.1", note: "of 5"}

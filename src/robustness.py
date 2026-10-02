@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -128,7 +129,7 @@ def _digest(obj):
 
 def _code_sha():
     names = ("robustness.py", "passes.py", "ukf_resid.py", "ukf_ext.py", "ukf_numba.py", "ukf.py", "state_space.py",
-             "model.py", "regression.py")
+             "model.py", "regression.py", "freerun.py")
     return hashlib.sha256(b"".join((REPO_ROOT / "src" / n).read_bytes() for n in names)).hexdigest()
 
 
@@ -519,27 +520,30 @@ def run_c1(cfg, root, seed, *, pilot, confirmatory=False, loader=None, pilot_ids
 
 # ---- Holm family (§14, §15.2; IMP-080) ----------------------------------------------------------------------------
 
-def holm_members(cfg):
+def holm_members(cfg, c4_attempted=True):
     """The members of the Holm family, every test of the four §15.2 bullets (IMP-080): C1 M0->M1 and M1->M2 (G1), the
     free-run error per scoring window (G5), the test-partition ICC per direction (G4) and C1 per non-primary split
-    seed (G3). The count must equal statistics.holm_family_size."""
+    seed (G3). The count must equal statistics.holm_family_size, or, when C4 is 'not attempted' (IMP-084), the three
+    free-run members are absent and the count must equal statistics.holm_family_size_without_freerun."""
     members = [{"name": f"c1_step:{name}", "bullet": "c1_other_steps", "stage": "G1"}
                for name, _later, _earlier, role in COMPARISONS if role == "secondary_holm_family"]
-    members += [{"name": f"freerun:{w}s", "bullet": "freerun_error_per_window", "stage": "G5"}
-                for w in cfg["windows"]["scoring_windows_s"]]
+    if c4_attempted:
+        members += [{"name": f"freerun:{w}s", "bullet": "freerun_error_per_window", "stage": "G5"}
+                    for w in cfg["windows"]["scoring_windows_s"]]
     members += [{"name": f"c3_test_icc:{d}", "bullet": "c3_test_partition_icc", "stage": "G4"}
                 for d in cfg["statistics"]["c3"]["directions"]]
     members += [{"name": f"c1_seed:{s}", "bullet": "c1_split_seed_level", "stage": "G3"} for s in cfg["split"]["extra_seeds"]]
-    size = int(cfg["statistics"]["holm_family_size"])
+    leaf = "holm_family_size" if c4_attempted else "holm_family_size_without_freerun"
+    size = int(cfg["statistics"][leaf])
     if len(members) != size:
-        raise RobustnessError(f"the Holm family has {len(members)} members but statistics.holm_family_size is {size}")
+        raise RobustnessError(f"the Holm family has {len(members)} members but statistics.{leaf} is {size}")
     return members
 
 
-def holm_report(cfg, raw_p):
+def holm_report(cfg, raw_p, c4_attempted=True):
     """raw_p: {member name: p or None}. Adjusted values only for a COMPLETE family (every member present with a finite p
     in [0, 1]); otherwise status 'partial_family', the missing members, and no adjusted value (IMP-078, IMP-080)."""
-    members = holm_members(cfg)
+    members = holm_members(cfg, c4_attempted)
     names = [m["name"] for m in members]
     unknown = sorted(set(raw_p) - set(names))
     if unknown:
@@ -1367,3 +1371,252 @@ def run_c2(cfg, root, *, pilot, confirmatory=False, force=False):
     status = write_c1(path, _clean(doc), force=force)
     log.info("C2: %s (%s)", status, path)
     return {"doc": doc, "path": path, "status": status}
+
+
+# ==== G5: C4 free-run (IMP-086) ===================================================================================
+
+def c4_recording(rec, cfg, residual=None, filter_name=None, lengths=None, rng_key=None, cache_dir=None, equation_sha=None,
+                 model_name="M2"):
+    """One recording, one model: a forward pass 1 (filter A, q_fixed) that captures the filtered state at every window
+    start, then the free-run of every window at every length (freerun.score_windows). A recording whose pass 1 diverged at
+    recording level gets no windows (it counts as unstable, IMP-086). Returns {"pass1_diverged", "windows": [{"length_s",
+    "segment", "t0", "stable", "error", "segment_errors"}]}; cached per (recording, model) when the recording has a key."""
+    from src import freerun
+    from src import state_space as ss_
+    segs, starts = rec["segments"], rec["starts"]
+    fname = passes.resolve_filter(cfg, filter_name)
+    qv = passes.resolve_q(cfg, None, fname)
+    lengths = list(cfg["windows"]["scoring_windows_s"] if lengths is None else lengths)
+    path = None
+    if cache_dir is not None and rec.get("key") is not None:
+        key = _digest({"rec": rec["key"], "filter": fname, "q": qv, "cfg": _digest(cfg), "code": _code_sha(),
+                       "starts": [int(x) for x in starts], "lengths": lengths, "rng": list(rng_key), "model": model_name,
+                       "eq": equation_sha if model_name == "M3" else None})
+        path = Path(cache_dir) / f"{rec['id']}_{model_name}_{key}.json"
+        hit = _cache_json(path)
+        if hit is not None:
+            return hit
+    layout = ss_.make_layout(cfg)
+    spec = passes.make_spec(cfg, fname, segs)
+    fs = cfg["preprocessing"]["observation_fs_hz"]
+    seg_lengths = [int(np.asarray(s).shape[1]) for s in segs]
+    first = freerun.mask_starts(passes.scoring_mask(seg_lengths, cfg))
+    capture = freerun.capture_indices(seg_lengths, first, [int(round(L * fs)) for L in lengths])
+    p1 = passes.run_pass1(segs, starts, cfg, q=qv, layout=layout, forward_only=True, filter_name=fname, spec=spec,
+                          residual=residual, capture_idx=capture)
+    out = {"pass1_diverged": bool(p1.recording_diverged), "windows": []}
+    if not p1.recording_diverged:
+        scored = freerun.score_windows(segs, p1, spec, layout, cfg, qv, lengths, rng_key, residual=residual)
+        out["windows"] = [dict(row, length_s=L) for L in lengths for row in scored[L]]
+    _cache_json_write(path, out)
+    return out
+
+
+def _c4_worker(payload):
+    """Top-level (Windows spawn): one recording's free-run for each model; the frozen equation travels as its document."""
+    from threadpoolctl import threadpool_limits
+    rec, cfg, frozen_doc, frozen_sha, filter_name, lengths, rng_key, cache_dir = payload
+    out = {}
+    with threadpool_limits(limits=1):
+        out["M2"] = c4_recording(rec, cfg, None, filter_name, lengths, rng_key, cache_dir, None, "M2")
+        if frozen_doc is not None:
+            from src import regression
+            residual = regression.FrozenEquation(doc=frozen_doc, sha256=frozen_sha).residual()
+            out["M3"] = c4_recording(rec, cfg, residual, filter_name, lengths, rng_key, cache_dir, frozen_sha, "M3")
+    return out
+
+
+def c4_recording_summary(res, lengths, cfg):
+    """Stability and the per-length error of one recording and model. A window is unstable if any realization diverged; the
+    recording is unstable at a length if its pass 1 diverged, it has no window at that length, or MORE than
+    windows.c4.recording_unstable_window_fraction of its windows are unstable (exact arithmetic). Its error at a length is
+    the mean over its stable windows. stable_all: stable at every length."""
+    frac = cfg["windows"]["c4"]["recording_unstable_window_fraction"]
+    per, stable_all = {}, not res["pass1_diverged"]
+    for L in lengths:
+        rows = [w for w in res["windows"] if w["length_s"] == L]
+        n_unstable = sum(not w["stable"] for w in rows)
+        reason = "pass1_diverged" if res["pass1_diverged"] else ("no_windows" if not rows else None)
+        unstable = reason is not None or passes.exceeds_fraction(n_unstable, len(rows), frac)
+        if reason is None and unstable:
+            reason = "too_many_unstable_windows"
+        errs = [w["error"] for w in rows if w["stable"]]
+        per[L] = {"n_windows": len(rows), "n_unstable": int(n_unstable), "unstable": bool(unstable), "reason": reason,
+                  "error": None if unstable or not errs else float(np.mean(errs))}
+        stable_all = stable_all and not unstable
+    return {"pass1_diverged": bool(res["pass1_diverged"]), "per_length": per, "stable_all": bool(stable_all)}
+
+
+def c4_stable_fraction(summaries, cfg):
+    """The §10.2 condition on stability: at least windows.c4.min_stable_fraction of the recordings are stable at every
+    length (exact arithmetic; a recording whose pass 1 diverged is unstable)."""
+    n = len(summaries)
+    n_ok = sum(s["stable_all"] for s in summaries)
+    need = Fraction(str(cfg["windows"]["c4"]["min_stable_fraction"]))
+    return {"n_recordings": n, "n_stable": int(n_ok), "fraction": (n_ok / n) if n else None,
+            "min_fraction": float(need), "met": bool(n and Fraction(int(n_ok)) >= need * n)}
+
+
+def c4_gate_full_pass(gate):
+    """§10.2: G0 fully passes (no low_confidence flag, no hard stop, complete). Anything else, or no gate, is not a pass."""
+    if not isinstance(gate, dict):
+        return False
+    return bool(gate.get("low_confidence") is False and gate.get("hard_stop") is False and gate.get("complete", True))
+
+
+def c4_ratio(e_short, e_long, idx, cfg):
+    """Ratio of subject means, long over short window length, with the percentile CI of the RATIO over subject resamples
+    from the pre-drawn index matrix (IMP-086); upper = the 1 - (1 - ci_level) / 2 percentile (97.5th for 95%)."""
+    e_short, e_long = np.asarray(e_short, dtype=np.float64), np.asarray(e_long, dtype=np.float64)
+    if e_short.shape != e_long.shape or idx.shape[1] != e_short.size:
+        raise RobustnessError("the free-run errors and the index matrix disagree in width")
+    level = float(cfg["statistics"]["ci_level"])
+    a = (1.0 - level) / 2.0
+    boots = resample_means(e_long, idx) / resample_means(e_short, idx)
+    lo, hi = (float(v) for v in np.quantile(boots, [a, 1.0 - a]))
+    return {"ratio": float(e_long.mean() / e_short.mean()), "ci": [lo, hi], "ci_level": level, "upper": hi,
+            "B": int(idx.shape[0]), "n": int(e_short.size)}
+
+
+def c4_ratio_analysis(summaries, lengths, cfg, seed, n_boot):
+    """The C4 statistic over the recordings stable at every length (the same subject set at all lengths): per length above
+    the shortest, the ratio of the mean error to the mean error at the shortest, its bootstrap CI and the verdict against
+    criteria.c4_ratio_upper_ci_max. Verdict None unless every configured scoring length was run (the pilot runs 2 and 10 s)."""
+    ok = [s for s in summaries if s["stable_all"]]
+    base = lengths[0]
+    out = {"n_subjects": len(ok), "base_length_s": base, "ratios": {}}
+    if len(ok) < 2:
+        out["status"] = "too_few_subjects"
+        return out
+    idx = draw_index_matrix(len(ok), n_boot, cfg["statistics"]["bootstrap_seed"], seed)
+    out["bootstrap"] = {"B": int(n_boot), "seed": [int(cfg["statistics"]["bootstrap_seed"]), int(seed), len(ok)],
+                        "index_matrix_sha256": hashlib.sha256(idx.tobytes()).hexdigest()}
+    limit = float(cfg["statistics"]["criteria"]["c4_ratio_upper_ci_max"])
+    e0 = np.array([s["per_length"][base]["error"] for s in ok])
+    for L in lengths[1:]:
+        r = c4_ratio(e0, np.array([s["per_length"][L]["error"] for s in ok]), idx, cfg)
+        r["upper_at_most_limit"] = bool(r["upper"] <= limit)
+        out["ratios"][str(L)] = r
+    out["limit"] = limit
+    out["status"] = "ok"
+    full = [int(x) for x in cfg["windows"]["scoring_windows_s"]]
+    out["passed"] = bool(all(r["upper_at_most_limit"] for r in out["ratios"].values())) if [int(x) for x in lengths] == full \
+        else None
+    return out
+
+
+def c4_freerun_contrast(sum_m2, sum_m3, lengths, cfg, seed, n_boot, same_model=False):
+    """The three free-run Holm members (IMP-084, IMP-086): per length, the paired per-subject difference of the mean free-run
+    error, M3 minus M2, over the recordings stable at that length in BOTH models and over the windows stable in both; the
+    percentile bootstrap p of paired_bootstrap. same_model (a no-term equation: M3 is M2) gives a difference of zero and
+    p = 1 without re-running. sum_*: {subject: summary with the windows kept}."""
+    out = {}
+    for L in lengths:
+        d = []
+        for sid in sorted(sum_m2):
+            a, b = sum_m2[sid], sum_m3[sid]
+            if a["per_length"][L]["unstable"] or b["per_length"][L]["unstable"]:
+                continue
+            wa = {(w["segment"], w["t0"]): w for w in a["windows"] if w["length_s"] == L and w["stable"]}
+            wb = {(w["segment"], w["t0"]): w for w in b["windows"] if w["length_s"] == L and w["stable"]}
+            common = sorted(set(wa) & set(wb))
+            if common:
+                d.append(float(np.mean([wb[k]["error"] for k in common]) - np.mean([wa[k]["error"] for k in common])))
+        if len(d) < 2:
+            out[f"freerun:{L}s"] = {"status": "too_few_subjects", "n": len(d), "p": None}
+            continue
+        idx = draw_index_matrix(len(d), n_boot, cfg["statistics"]["bootstrap_seed"], seed)
+        out[f"freerun:{L}s"] = dict(paired_bootstrap(np.array(d), idx, cfg), status="ok", difference="M3 - M2",
+                                    same_model=bool(same_model))
+    return out
+
+
+def run_c4(cfg, root, seed, *, pilot, confirmatory=False, loader=None, pilot_ids=None, frozen=None, use_cache=True,
+           force=False, filter_name=None, n_jobs=None):
+    """C4 for the primary split seed. Pilot: every pilot ses-t1 recording, results/pilot/, mechanics only, the gate is not
+    read as a condition, scoring windows pilot_scoring_windows_s, no verdict and no Holm p. Confirmatory: the test
+    recordings behind the gate and a frozen-equation file; when G0 does not fully pass, C4 is 'not attempted' and no recording
+    is read at all (IMP-084, IMP-086); when it does, every recording is free-run (M3, and M2 for the Holm contrast) and the
+    stability condition is evaluated on the result: below the minimum share C4 is 'not attempted' and the free-run Holm members
+    get no p. Without a frozen equation (pilot) the model is the M2 stand-in. The recordings are loaded in this process (the
+    guard stays here), the filter and the free-run go to the loky pool."""
+    from src import regression, tuning
+    root = Path(root)
+    plan = resolve_diag_subjects(cfg, root, seed, pilot=pilot, confirmatory=confirmatory, pilot_ids=pilot_ids)
+    gate_path = root / cfg["paths"]["gate_file"]
+    gate = json.loads(gate_path.read_text(encoding="utf-8")) if gate_path.is_file() else None
+    lengths = [int(x) for x in cfg["windows"]["pilot_scoring_windows_s" if pilot else "scoring_windows_s"]]
+    fpath = regression.frozen_equation_path(cfg, root, seed, pilot)
+    if frozen is None and fpath.is_file():
+        frozen = regression.load_frozen_equation(fpath)
+    gate_ok = c4_gate_full_pass(gate)
+    if frozen is None:
+        if plan.mode == "confirmatory" and gate_ok:
+            raise GuardError("confirmatory C4 needs the frozen equation")
+        m3_mode = "absent"
+    else:
+        m3_mode = "no_term" if frozen.no_term else "scored"
+    sha = None if frozen is None else frozen.sha256
+    doc = {"schema": int(cfg["statistics"]["c4"]["schema_version"]), "split_seed": int(seed), "pilot": bool(pilot),
+           "mechanics_only": bool(pilot), "mode": plan.mode, "lengths_s": lengths, "filter": passes.resolve_filter(cfg, filter_name),
+           "q": passes.resolve_q(cfg, None, passes.resolve_filter(cfg, filter_name)),
+           "model": {"mode": m3_mode, "frozen_equation_sha256": sha, "scored": {"scored": "M3", "no_term": "M3 (= M2)",
+                                                                                "absent": "M2 stand-in"}[m3_mode]},
+           "n_realizations": int(cfg["windows"]["c4"]["n_realizations"]),
+           "gate": {"full_pass": gate_ok, "low_confidence": None if gate is None else gate.get("low_confidence"),
+                    "used_as_condition": not pilot},
+           "subjects": list(plan.ids)}
+    path = _result_path(cfg, root, seed, pilot, "c4")
+
+    def finish(status, extra):
+        doc.update(extra, status=status, holm_c4_attempted=(None if pilot else status == "attempted"))
+        doc["provenance"] = _provenance(cfg, root, seed, {"frozen_equation_sha256": sha})
+        st = write_c1(path, _clean(doc), force=force)
+        log.info("C4, split seed %s: %s %s (%s)", seed, status, st, path)
+        return {"doc": doc, "path": path, "status": st}
+
+    if not pilot:
+        tuning.check_gate(cfg, root)
+        if not gate_ok:
+            return finish("not_attempted", {"reason": "G0 does not fully pass (low_confidence, hard stop or incomplete gate)",
+                                            "holm_raw_p": {}})
+    if loader is None:
+        loader = tuning.make_real_loader(cfg, root, plan.pilot_ids, allow_all=plan.allow_all)
+    loader = guarded_loader(loader, plan)
+    recs, excluded = [], []
+    for i, sid in enumerate(plan.ids):
+        res = loader(sid)
+        if res["reason"] is not None:
+            excluded.append({"subject": sid, "reason": res["reason"]})
+            continue
+        recs.append((i, {"id": sid, "segments": res["segments"], "starts": res["starts"], "key": res.get("key")}))
+    cache_dir = (root / cfg["paths"]["cache_dir"] / cfg["statistics"]["c4"]["cache_subdir"]) if use_cache else None
+    fdoc = frozen.doc if m3_mode == "scored" else None
+    fname = passes.resolve_filter(cfg, filter_name)
+    cseed = int(cfg["windows"]["c4"]["seed"])
+    payloads = [(r, cfg, fdoc, sha, fname, lengths, (cseed, i), cache_dir) for i, r in recs]
+    results = dict(zip([r["id"] for _, r in recs], _map(_c4_worker, payloads, cfg, n_jobs)))
+    primary = "M3" if m3_mode == "scored" else "M2"
+    sums = {m: {sid: dict(c4_recording_summary(res[m], lengths, cfg), windows=res[m]["windows"])
+                for sid, res in results.items()} for m in ("M2", "M3") if any(m in res for res in results.values())}
+    sum_list = [sums[primary][sid] for sid in sorted(sums[primary])]
+    cond = c4_stable_fraction(sum_list, cfg)
+    n_boot = int(cfg["statistics"]["bootstrap_B_pilot" if pilot else "bootstrap_B"])
+    per_subject = {sid: {m: {k: v for k, v in sums[m][sid].items() if k != "windows"} for m in sums} for sid in sorted(sums[primary])}
+    extra = {"excluded_subjects": excluded, "per_subject": per_subject, "stability_condition": cond}
+    if pilot:
+        extra.update(ratio_analysis=c4_ratio_analysis(sum_list, lengths, cfg, seed, n_boot), holm_raw_p={},
+                     c4_verdict={"passed": None, "reason": "pilot: mechanics only"})
+        return finish("mechanics_only", extra)
+    if not cond["met"]:
+        extra.update(reason="fewer than the minimum share of the recordings are stable at every length", holm_raw_p={})
+        return finish("not_attempted", extra)
+    analysis = c4_ratio_analysis(sum_list, lengths, cfg, seed, n_boot)
+    if m3_mode == "no_term":
+        contrast = c4_freerun_contrast(sums["M2"], sums["M2"], lengths, cfg, seed, n_boot, same_model=True)
+    else:
+        contrast = c4_freerun_contrast(sums["M2"], sums["M3"], lengths, cfg, seed, n_boot)
+    extra.update(ratio_analysis=analysis, c4_verdict={"passed": analysis.get("passed"), "reason": "upper CI bound of each ratio "
+                                                      "against the limit"},
+                 freerun_contrast=contrast, holm_raw_p={k: v["p"] for k, v in contrast.items()})
+    return finish("attempted", extra)

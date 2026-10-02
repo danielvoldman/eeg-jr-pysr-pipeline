@@ -50,8 +50,11 @@ def run_filter_numpy(z, cfg, base_layout, q, spec, residual=None, x0=None, P0=No
         z_pred=np.full((T, 2), np.nan), S=np.full((T, 2, 2), np.nan), innovation=np.full((T, 2), np.nan),
         nis=np.full(T, np.nan), min_eig=np.full(T, np.nan), snapshots=np.full((T, buf.delay + 1, 2), np.nan),
         layout=ukf_ext.ext_layout(base_layout, spec), q=q)
+    res.pots_snap = None if hook is None else np.full((T, buf.delay + 1, 2), np.nan)   # C4 free-run start states (IMP-086)
     for t in range(T):
         res.snapshots[t] = ukf.buffer_snapshot(buf)
+        if hook is not None:
+            res.pots_snap[t] = ukf.buffer_snapshot(hook.pots)
         try:
             filt.predict()
             filt.update(z[t])
