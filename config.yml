@@ -511,6 +511,7 @@ g0:
     timing_file: {value: "g0_pilot_timing.json", prov: placeholder, ref: "PLAN E5, IMP-070", note: "under paths.pilot_results_dir"}
     tuning_fallback: {value: "flag_off_nis", prov: placeholder, ref: "PLAN E5, IMP-070", note: "when the section 7.5 rule refuses under the standard divergence rule, q is tuned by the same NIS rule with the state-SD flag disabled in a config copy; DIAGNOSTIC ONLY, labelled in every output; any other value means no fallback; NOT READ by synthetic_gate.run_pilot since IMP-090 (G0 runs at ukf.process_noise.q_fixed), kept only for the diagnostic tool e6"}
     comparison_schema_version: {value: 1, prov: placeholder, ref: "PLAN E5, IMP-070"}
+
   rule_selection:
     e_max: {value: 3, prov: placeholder, ref: "DEV-007, IMP-091", note: "truth-based runaway label: centred RMS error of a filtered PSP state (y0, y1, y2 of both nodes) over the true state's SD above this ratio (a constant predictor scores 1)"}
     parameter_label_sd_multiple: {value: 8, prov: placeholder, ref: "DEV-007, IMP-091", note: "truth-based runaway label: the time-mean filtered p1, p2, log_rho1, log_rho2, g12, g21 or m farther than this many prior SD from the TRUE value (not from the prior)"}

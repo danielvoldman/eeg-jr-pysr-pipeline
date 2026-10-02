@@ -13,6 +13,7 @@ from src import baseline, freerun as fr, model, passes, regression, robustness a
 from src import state_space as ss
 from src.config import load_config
 from sim_data import make_recording
+from legacy_rule import legacy
 
 CFG = load_config()
 REPO = Path(__file__).resolve().parent.parent
@@ -132,7 +133,7 @@ def test_white_observation_noise_has_the_filters_R_and_the_ou_state_its_stationa
 def test_a_start_far_from_the_fixed_point_or_a_non_finite_residual_is_unstable():
     spec0 = ukf_ext.Spec("A", s2=(0.0, 0.0), tau=(1.0, 1.0))
     sd0 = np.sqrt(CFG["ukf"]["initial_state"]["neural_variance"][0])
-    far = fr.simulate(start_state(spec0, shift=30.0 * sd0), 5, np.random.default_rng(1), CFG, LAYOUT, spec0, Q, n_real=4)
+    far = fr.simulate(start_state(spec0, shift=30.0 * sd0), 5, np.random.default_rng(1), legacy(CFG), LAYOUT, spec0, Q, n_real=4)
     assert far["unstable"].all() and np.isnan(far["y"][:, 1:]).all()
     ok = fr.simulate(start_state(spec0), 20, np.random.default_rng(1), CFG, LAYOUT, spec0, Q, n_real=4)
     assert not ok["unstable"].any() and np.isfinite(ok["y"]).all()

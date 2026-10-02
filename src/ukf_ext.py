@@ -28,7 +28,7 @@ from src import ukf
 from src import ukf_numba as U
 from scipy.signal import welch
 from src.ukf_numba import (I_DONE, I_FALLBACKS, I_JITTER, I_REASON, I_STEP, I_UPDATES, N_INFO, NN, NREF, NS, R_CHOL,  # noqa: F401
-                           R_NAN, R_PD, R_SINGULAR, R_STATE, Y1, Y2, _coupled_fixed_point, _observe, _params6,
+                           R_NAN, R_PARAM, R_PD, R_SINGULAR, R_STATE, Y1, Y2, _coupled_fixed_point, _observe, _params6,
                            _predict, _sigma_points, _ut)
 
 
@@ -51,7 +51,7 @@ def _extra_observe(X, nx, out):
 @njit(cache=True, fastmath=False)
 def _filter_kernel_ext(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, dt, delay,
                    pidx, pconst, ab, a, b, C1, C2, C3, C4, e0, v0, r, mu, m_lo, m_hi,
-                   ref, ref_params, prior_sd, frac, sd12, mult, n_exempt, keep_cov, prior_center, npts_scan, n_bisect, fp_tol, fp_iter, fp_h,
+                   ref, ref_params, prior_sd, frac, sd12, mult, n_exempt, n_dwell, n_pdwell, pcols, pmean, plim, keep_cov, prior_center, npts_scan, n_bisect, fp_tol, fp_iter, fp_h,
                    nx, phi, rad,
                    out_x, out_P, out_zp, out_S, out_innov, out_nis, out_mineig, out_snap, p_last,
                    info, zp, S, yv, nisv, out_R):
@@ -60,6 +60,8 @@ def _filter_kernel_ext(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, d
     fallbacks. The reference tracker (IMP-029) is in-kernel: ref and ref_params are updated in place."""
     T = z.shape[0]
     n = x.shape[0]
+    cnt_s = 0
+    cnt_p = 0
     npts = 2 * n + 1
     size = ring.shape[0]
     sig = np.empty((npts, n))
@@ -184,10 +186,33 @@ def _filter_kernel_ext(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, d
             reason = R_NAN
         elif min_eig + jitter <= 0.0:
             reason = R_PD
-        elif t >= n_exempt:
-            for j in range(NN):
-                if abs(x[j] - ref[j]) > mult * sd12[j]:
-                    reason = R_STATE
+        else:
+            # DEV-007: the state clause needs n_dwell CONSECUTIVE samples beyond the multiple (n_dwell = 1 is the legacy
+            # first-crossing rule); the parameter clause needs n_pdwell consecutive samples beyond plim (inf = off)
+            if t >= n_exempt:
+                beyond = False
+                for j in range(NN):
+                    if abs(x[j] - ref[j]) > mult * sd12[j]:
+                        beyond = True
+                if beyond:
+                    cnt_s += 1
+                    if cnt_s >= n_dwell:
+                        reason = R_STATE
+                else:
+                    cnt_s = 0
+            if reason == 0:
+                pbeyond = False
+                for k in range(7):
+                    c = pcols[k]
+                    if c >= 0:
+                        if abs(x[c] - pmean[k]) > plim[k]:
+                            pbeyond = True
+                if pbeyond:
+                    cnt_p += 1
+                    if cnt_p >= n_pdwell:
+                        reason = R_PARAM
+                else:
+                    cnt_p = 0
         if reason != 0:
             info[I_STEP] = t
             info[I_REASON] = reason
@@ -346,6 +371,7 @@ def run_filter_ext(z, cfg, base_layout, q, spec, x0=None, P0=None, buffer=None, 
     buf = d_buf if buffer is None else buffer
     fs = cfg["preprocessing"]["observation_fs_hz"]
     n_exempt = int(round(cfg["ukf"]["divergence"]["startup_exempt_s"] * fs))
+    dwell = ukf.dwell_settings(base_layout, cfg)
     sd12 = np.sqrt(np.tile(ss.neural_variance(cfg), ss.N_NODES))
     lam, Wm, Wc = U.weights_for(n, cfg)
     R = ukf.obs_noise(cfg)
@@ -378,7 +404,7 @@ def run_filter_ext(z, cfg, base_layout, q, spec, x0=None, P0=None, buffer=None, 
     code = _filter_kernel_ext(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, dt, buf.delay,
                               pidx, pconst, ab, a, b, C1, C2, C3, C4, e0, v0, r, mu, m_lo, m_hi,
                               ref, ref_params, prior_sd, dv["reference_refresh_fraction_of_prior_sd"], sd12,
-                              float(dv["state_sd_multiple"]), n_exempt, bool(keep_cov), prior_center, *fp,
+                              float(dv["state_sd_multiple"]), n_exempt, *dwell, bool(keep_cov), prior_center, *fp,
                               nx, phi, rad, out_x, out_P, out_zp, out_S, out_innov, out_nis, out_mineig, out_snap,
                               p_last, info, zp_a, S_a, yv_a, nis_a, out_R)
     res.n_done = int(info[I_DONE])

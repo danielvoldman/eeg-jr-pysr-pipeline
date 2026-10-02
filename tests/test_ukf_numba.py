@@ -18,6 +18,7 @@ from src import passes, tuning, ukf, ukf_numba
 from src import state_space as ss
 from src.config import load_config
 from tests import sim_data
+from tests.legacy_rule import legacy
 
 CFG = load_config()
 RTOL, ATOL = CFG["ukf"]["numba"]["rtol"], CFG["ukf"]["numba"]["atol"]
@@ -317,7 +318,7 @@ def test_state_flag_is_raised_after_the_startup_exemption_at_the_same_step(layou
     (the parameters leave any sensible range), so only the flag, step and reason are compared, plus the number of
     reference refreshes; the split between solved and failed fixed points depends on rounding there."""
     z = sim_data.simulate_stream(CFG, 2, 31)[1] + 100.0
-    a, b = both(z, layout, keep_cov=False)
+    a, b = both(z, layout, cfg=legacy(CFG), keep_cov=False)
     n_exempt = int(round(CFG["ukf"]["divergence"]["startup_exempt_s"] * CFG["preprocessing"]["observation_fs_hz"]))
     assert a.diverged and a.divergence_reason == "state_beyond_sd_multiple" and a.divergence_step >= n_exempt
     assert (b.diverged, b.divergence_step, b.divergence_reason) == (a.diverged, a.divergence_step, a.divergence_reason)

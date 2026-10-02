@@ -36,8 +36,10 @@ Y1, Y2 = model.Y1, model.Y2
 NREF = len(ukf.DivergenceReference.KEYS)              # parameters the divergence reference depends on
 # divergence reason codes (info[I_REASON]) and the info layout
 R_NAN, R_PD, R_STATE, R_CHOL, R_SINGULAR = 1, 2, 3, 4, 5
+R_PARAM = 6                                           # DEV-007: parameter_beyond_prior_sd
 I_STEP, I_REASON, I_DONE, I_JITTER, I_UPDATES, I_FALLBACKS, N_INFO = 0, 1, 2, 3, 4, 5, 6
-_REASONS = {R_NAN: "nan_inf", R_PD: "covariance_not_pd", R_STATE: "state_beyond_sd_multiple"}
+_REASONS = {R_NAN: "nan_inf", R_PD: "covariance_not_pd", R_STATE: "state_beyond_sd_multiple",
+            R_PARAM: "parameter_beyond_prior_sd"}
 _LINALG = {R_CHOL: "Matrix is not positive definite", R_SINGULAR: "Singular matrix"}
 
 # kernel return codes
@@ -347,7 +349,7 @@ def _coupled_fixed_point(p1, p2, lr1, lr2, g12, g21, ab, a, b, C1, C2, C3, C4, e
 @njit(cache=True, fastmath=False)
 def _filter_kernel(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, dt, delay,
                    pidx, pconst, ab, a, b, C1, C2, C3, C4, e0, v0, r, mu, m_lo, m_hi,
-                   ref, ref_params, prior_sd, frac, sd12, mult, n_exempt, keep_cov, prior_center, npts_scan, n_bisect, fp_tol, fp_iter, fp_h,
+                   ref, ref_params, prior_sd, frac, sd12, mult, n_exempt, n_dwell, n_pdwell, pcols, pmean, plim, keep_cov, prior_center, npts_scan, n_bisect, fp_tol, fp_iter, fp_h,
                    out_x, out_P, out_zp, out_S, out_innov, out_nis, out_mineig, out_snap, p_last,
                    info, zp, S, yv, nisv):
     """Forward filter over all steps. Returns 0 (all steps done) or 1 (diverged; info[1] the reason code,
@@ -355,6 +357,8 @@ def _filter_kernel(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, dt, d
     fallbacks. The reference tracker (IMP-029) is in-kernel: ref and ref_params are updated in place."""
     T = z.shape[0]
     n = x.shape[0]
+    cnt_s = 0
+    cnt_p = 0
     npts = 2 * n + 1
     size = ring.shape[0]
     sig = np.empty((npts, n))
@@ -468,10 +472,33 @@ def _filter_kernel(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, dt, d
             reason = R_NAN
         elif min_eig + jitter <= 0.0:
             reason = R_PD
-        elif t >= n_exempt:
-            for j in range(NN):
-                if abs(x[j] - ref[j]) > mult * sd12[j]:
-                    reason = R_STATE
+        else:
+            # DEV-007: the state clause needs n_dwell CONSECUTIVE samples beyond the multiple (n_dwell = 1 is the legacy
+            # first-crossing rule); the parameter clause needs n_pdwell consecutive samples beyond plim (inf = off)
+            if t >= n_exempt:
+                beyond = False
+                for j in range(NN):
+                    if abs(x[j] - ref[j]) > mult * sd12[j]:
+                        beyond = True
+                if beyond:
+                    cnt_s += 1
+                    if cnt_s >= n_dwell:
+                        reason = R_STATE
+                else:
+                    cnt_s = 0
+            if reason == 0:
+                pbeyond = False
+                for k in range(7):
+                    c = pcols[k]
+                    if c >= 0:
+                        if abs(x[c] - pmean[k]) > plim[k]:
+                            pbeyond = True
+                if pbeyond:
+                    cnt_p += 1
+                    if cnt_p >= n_pdwell:
+                        reason = R_PARAM
+                else:
+                    cnt_p = 0
         if reason != 0:
             info[I_STEP] = t
             info[I_REASON] = reason
@@ -623,6 +650,7 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
     buf = d_buf if buffer is None else buffer
     fs = cfg["preprocessing"]["observation_fs_hz"]
     n_exempt = int(round(cfg["ukf"]["divergence"]["startup_exempt_s"] * fs))
+    dwell = ukf.dwell_settings(layout, cfg)
     sd12 = np.sqrt(np.tile(ss.neural_variance(cfg), ss.N_NODES))
     lam, Wm, Wc = weights_for(n, cfg)
     Qm, R = ukf.process_noise(layout, cfg, q), ukf.obs_noise(cfg)
@@ -655,7 +683,7 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False)
     code = _filter_kernel(z, x, P, ring, head, lam, Wm, Wc, Qm, R, jitter, n_sub, dt, buf.delay,
                           pidx, pconst, ab, a, b, C1, C2, C3, C4, e0, v0, r, mu, m_lo, m_hi,
                           ref, ref_params, prior_sd, dv["reference_refresh_fraction_of_prior_sd"], sd12,
-                          float(dv["state_sd_multiple"]), n_exempt, bool(keep_cov), prior_center, *fp,
+                          float(dv["state_sd_multiple"]), n_exempt, *dwell, bool(keep_cov), prior_center, *fp,
                           out_x, out_P, out_zp, out_S, out_innov, out_nis, out_mineig, out_snap, p_last,
                           info, zp_a, S_a, yv_a, nis_a)
     res.n_done = int(info[I_DONE])

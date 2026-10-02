@@ -124,6 +124,8 @@ def simulate(start, n_steps, rng, cfg, layout, spec, q, residual=None, n_real=No
     draws = rng.standard_normal((int(n_steps), n_real, ss.N_NEURAL + nx + ss.N_NODES))
     y = np.full((n_real, int(n_steps), ss.N_NODES), np.nan)
     unstable = np.zeros(n_real, dtype=bool)
+    run_len = np.zeros(n_real, dtype=np.int64)
+    n_dwell = max(1, int(round(cfg["ukf"]["divergence"]["state_dwell_s"] * cfg["preprocessing"]["observation_fs_hz"])))
     with np.errstate(all="ignore"):
         for t in range(int(n_steps)):
             X = propagate(X, ring, pots, layout, cfg, residual)
@@ -136,7 +138,9 @@ def simulate(start, n_steps, rng, cfg, layout, spec, q, residual=None, n_real=No
                 noise = noise * phi + sd_ou * draws[t, :, ss.N_NEURAL:ss.N_NEURAL + nx]
             obs = ss.observe(X, layout, cfg) + (noise if nx else 0.0)
             y[:, t] = obs + sd_obs * draws[t, :, -ss.N_NODES:]
-            unstable |= ~np.all(np.isfinite(X), axis=1) | np.any(np.abs(X[:, :ss.N_NEURAL] - centre) > mult * sd12, axis=1)
+            beyond = np.any(np.abs(X[:, :ss.N_NEURAL] - centre) > mult * sd12, axis=1)
+            run_len = np.where(beyond, run_len + 1, 0)               # DEV-007: consecutive samples beyond the multiple
+            unstable |= ~np.all(np.isfinite(X), axis=1) | (run_len >= n_dwell)
             if unstable.any():
                 break
     out = {"y": y, "unstable": unstable}

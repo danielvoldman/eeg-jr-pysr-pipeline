@@ -586,6 +586,7 @@ class Series:
     starts: list
     truth: object                # dict of (N, 2) arrays on the observation axis, or None
     meta: dict
+    states: object = None        # (N, 2, 6) true neural states on the observation axis (keep_states=True; F2 selection test), else None
 
     def summary(self):
         """Flat record of a series for the G0 outputs, including the matched z-distance of its operating point."""
@@ -599,7 +600,8 @@ class Series:
         return out
 
 
-def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None, with_truth=True, artifacts=None):
+def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None, with_truth=True, artifacts=None,
+                    operating_point=None, keep_states=False):
     """One synthetic series of arm 'positive', 'null_A', 'null_B' or 'artifact_null' (§9.1, §9.2, §5.2); see the module
     docstring. artifacts: None, 'independent' or 'bilateral' (the artifact-only null always uses 'bilateral')."""
     import time
@@ -616,7 +618,7 @@ def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None
     n_burn = int(round(g0["generation_burn_in_s"] * fs))
     n_keep = int(round((g0["series_duration_s"] + 2 * trim_s) * fs))
     t0 = time.perf_counter()
-    op = series_operating_point(cfg, grid, table, stream, i, round_)
+    op = series_operating_point(cfg, grid, table, stream, i, round_) if operating_point is None else dict(operating_point)
     p_vec = np.array([op["p"], op["p"]])
     hw = model.default_half_width(cfg) * op["input_sd_factor"]
     rng_in = series_rng(cfg, stream, arm, "input", i, round_)
@@ -659,8 +661,12 @@ def generate_series(cfg, arm, i, grid, table, stream, round_=0, level_index=None
         basis = (u_src / sim["sd"][::-1][None, :]) * (u_tgt / sim["sd"][None, :])
         truth = {"u_tgt": u_tgt, "u_src": u_src, "s_src": s_src, "basis": basis,
                  "planted": basis * (sim["A"][None, :] * a * sim["c"][None, :])}
+    states = None
+    if keep_states:                                           # F2 (IMP-091): the true neural states at the observation rows
+        n_all = int(round((y.shape[0] - 2 * int(round(trim_s * fs))) * obs_fs / fs))
+        states = np.ascontiguousarray(sim["states"][observation_rows(cfg, n_all)], dtype=np.float64)
     meta["timing_s"] = {"simulate": t_sim - t0, "observe_and_scale": t_obs - t_sim, "preprocess": t_pre - t_obs}
-    return Series(arm, int(i), stream, level_index, (g, g), m, op, res.segments, res.starts, truth, meta)
+    return Series(arm, int(i), stream, level_index, (g, g), m, op, res.segments, res.starts, truth, meta, states)
 
 
 # ---------------------------------------------------------------- E2: the G0 tuning set

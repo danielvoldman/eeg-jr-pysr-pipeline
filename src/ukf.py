@@ -263,6 +263,65 @@ def _first_divergence(x_post, P_post, cfg, center, sd, min_eig, check_state=True
     return None
 
 
+def dwell_settings(layout, cfg):
+    """(n_dwell, n_pdwell, pcols, pmean, plim) of the DEV-007 divergence clauses for a layout.
+
+    n_dwell: consecutive observation samples the state clause needs (1 = the legacy first-crossing rule; state_dwell_s = 0).
+    n_pdwell: the same for the parameter clause. pcols: state column of each of the seven parameters p1, p2, log_rho1,
+    log_rho2, g12, g21, m (-1: not in the state, e.g. a fixed-parameter window), pmean: its section 7.6 prior mean,
+    plim: parameter_sd_multiple x its prior SD (inf: the clause is off, parameter_sd_multiple null)."""
+    dv = cfg["ukf"]["divergence"]
+    fs = cfg["preprocessing"]["observation_fs_hz"]
+    n_dwell = max(1, int(round(dv["state_dwell_s"] * fs)))
+    n_pdwell = max(1, int(round(dv["parameter_dwell_s"] * fs)))
+    pcols = np.full(len(ss.PARAM_NAMES_FULL), -1, dtype=np.int64)
+    pmean = np.zeros(len(ss.PARAM_NAMES_FULL), dtype=np.float64)
+    plim = np.full(len(ss.PARAM_NAMES_FULL), np.inf, dtype=np.float64)
+    mult = dv["parameter_sd_multiple"]
+    if mult is not None and layout.fixed_params is None:
+        from src import ukf_numba                      # layout_arrays: the state index that supplies each parameter
+        pidx, _ = ukf_numba.layout_arrays(layout)
+        prior = ss.prior_mean(layout, cfg)
+        sd = dict(ss.parameter_prior_sd(cfg))
+        sd["m"] = cfg["priors"]["m_sd"]
+        for k, name in enumerate(ss.PARAM_NAMES_FULL):
+            if pidx[k] >= 0:
+                pcols[k], pmean[k], plim[k] = pidx[k], prior[pidx[k]], float(mult) * float(sd[name])
+    return n_dwell, n_pdwell, pcols, pmean, plim
+
+
+class DwellMonitor:
+    """NumPy counterpart of the in-kernel DEV-007 counters (the oracle of the Numba kernels): the §7.5 checks of
+    _first_divergence for NaN/Inf and covariance, then the state clause (n_dwell consecutive samples beyond the
+    multiple, counted after the start-up exemption) and the parameter clause (n_pdwell consecutive samples beyond
+    plim). Counters are per filter run, so they restart at every (re)initialization."""
+
+    def __init__(self, layout, cfg):
+        self.n_dwell, self.n_pdwell, self.pcols, self.pmean, self.plim = dwell_settings(layout, cfg)
+        self.cnt_s = self.cnt_p = 0
+        self.mult = cfg["ukf"]["divergence"]["state_sd_multiple"]
+
+    def check(self, x_post, P_post, cfg, center, sd, min_eig, check_state):
+        reason = _first_divergence(x_post, P_post, cfg, center, sd, min_eig, check_state=False)
+        if reason is not None:
+            return reason
+        if check_state:
+            if np.any(np.abs(x_post[:ss.N_NEURAL] - center) > self.mult * sd):
+                self.cnt_s += 1
+                if self.cnt_s >= self.n_dwell:
+                    return "state_beyond_sd_multiple"
+            else:
+                self.cnt_s = 0
+        use = self.pcols >= 0
+        if np.any(use) and np.any(np.abs(x_post[self.pcols[use]] - self.pmean[use]) > self.plim[use]):
+            self.cnt_p += 1
+            if self.cnt_p >= self.n_pdwell:
+                return "parameter_beyond_prior_sd"
+        else:
+            self.cnt_p = 0
+        return None
+
+
 def use_numba(cfg, backend=None):
     """backend "numba" / "numpy" force a path; None follows ukf.numba.enabled (null or false: NumPy, the
     reference and the default until the C5 validation is accepted, IMP-044)."""
@@ -295,6 +354,7 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False,
     P0 = d_P0 if P0 is None else np.asarray(P0, dtype=np.float64)
     buf = d_buf if buffer is None else buffer
     reference = DivergenceReference(layout, cfg)
+    monitor = DwellMonitor(layout, cfg)
     n_exempt = int(round(cfg["ukf"]["divergence"]["startup_exempt_s"] * cfg["preprocessing"]["observation_fs_hz"]))
     sd = np.sqrt(np.tile(ss.neural_variance(cfg), ss.N_NODES))
     filt = UnscentedFilter(
@@ -323,8 +383,7 @@ def run_filter(z, cfg, layout, q, x0=None, P0=None, buffer=None, keep_cov=False,
         finite = bool(np.all(np.isfinite(filt.P)))
         min_eig = float(np.linalg.eigvalsh(sym)[0]) if finite else float("nan")
         res.min_eig[t] = min_eig          # stored before the check: the offending step counts (IMP-025)
-        reason = _first_divergence(filt.x, filt.P, cfg, reference.center(filt.x), sd, min_eig,
-                                   check_state=t >= n_exempt)
+        reason = monitor.check(filt.x, filt.P, cfg, reference.center(filt.x), sd, min_eig, t >= n_exempt)
         if reason is not None:
             res.diverged, res.divergence_step, res.divergence_reason = True, t, reason
             break

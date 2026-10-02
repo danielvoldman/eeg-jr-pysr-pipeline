@@ -16,6 +16,7 @@ from filterpy.kalman import MerweScaledSigmaPoints, UnscentedKalmanFilter
 
 from src import model, state_space as ss, ukf
 from src.config import load_config
+from legacy_rule import legacy
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CFG = load_config()
@@ -707,9 +708,11 @@ def test_reference_flags_blown_up_state_and_spares_near_current_reference(layout
 
 def test_blown_up_run_is_flagged_after_the_startup_exemption(layout):
     _, z = simulate_data(2, seed=31)
-    res = ukf.run_filter(z + 100.0, CFG, layout, Q_TEST)         # 100 mV offset: nothing healthy about it
+    res = ukf.run_filter(z + 100.0, legacy(CFG), layout, Q_TEST)  # 100 mV offset: nothing healthy about it (legacy rule, DEV-007 off)
     assert res.diverged and res.divergence_reason == "state_beyond_sd_multiple"
     assert res.divergence_step >= STARTUP_STEPS
+    new = ukf.run_filter(z + 100.0, CFG, layout, Q_TEST)          # the DEV-007 rule also stops it, later or by the parameter clause
+    assert new.diverged and new.divergence_reason in ("state_beyond_sd_multiple", "parameter_beyond_prior_sd")
 
 
 # ---- C2c: start-up exemption (DEV-003) ---------------------------------------------------------------------
@@ -730,9 +733,9 @@ def test_startup_exemption_length_is_half_a_second():
 def test_state_flag_is_suppressed_at_step_2_and_raised_at_step_129(layout, monkeypatch):
     shifted_reference(monkeypatch)
     _, z = simulate_data(1, seed=3)
-    short = ukf.run_filter(z[:STARTUP_STEPS], CFG, layout, Q_TEST)      # steps 1..128: all exempt
+    short = ukf.run_filter(z[:STARTUP_STEPS], legacy(CFG), layout, Q_TEST)      # steps 1..128: all exempt
     assert not short.diverged and short.n_done == STARTUP_STEPS
-    res = ukf.run_filter(z[:STARTUP_STEPS + 10], CFG, layout, Q_TEST)
+    res = ukf.run_filter(z[:STARTUP_STEPS + 10], legacy(CFG), layout, Q_TEST)
     assert res.diverged and res.divergence_reason == "state_beyond_sd_multiple"
     assert res.divergence_step == STARTUP_STEPS and res.n_done == STARTUP_STEPS   # step 129 (1-based)
     assert res.monitor["startup_exempt_steps"] == STARTUP_STEPS

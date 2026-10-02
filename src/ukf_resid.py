@@ -39,6 +39,7 @@ def run_filter_numpy(z, cfg, base_layout, q, spec, residual=None, x0=None, P0=No
     n_exempt = int(round(cfg["ukf"]["divergence"]["startup_exempt_s"] * cfg["preprocessing"]["observation_fs_hz"]))
     sd = np.sqrt(np.tile(ss.neural_variance(cfg), ss.N_NODES))
     reference = ukf.DivergenceReference(base_layout, cfg)
+    monitor = ukf.DwellMonitor(base_layout, cfg)
     filt = ukf.UnscentedFilter(
         n, ukf.weights_for(n, cfg), Qm, ukf.obs_noise(cfg),
         propagate=lambda s, wm: np.hstack([ss.predict(s[:, :nb], wm, buf, base_layout, cfg, residual=hook), s[:, nb:] * phi]),
@@ -66,8 +67,7 @@ def run_filter_numpy(z, cfg, base_layout, q, spec, residual=None, x0=None, P0=No
         finite = bool(np.all(np.isfinite(filt.P)))
         min_eig = float(np.linalg.eigvalsh(sym)[0]) if finite else float("nan")
         res.min_eig[t] = min_eig
-        reason = ukf._first_divergence(filt.x, filt.P, cfg, reference.center(filt.x[:nb]), sd, min_eig,
-                                       check_state=t >= n_exempt)
+        reason = monitor.check(filt.x, filt.P, cfg, reference.center(filt.x[:nb]), sd, min_eig, t >= n_exempt)
         if reason is not None:
             res.diverged, res.divergence_step, res.divergence_reason = True, t, reason
             break

@@ -338,3 +338,41 @@ def test_config_leaves_for_e2():
     assert g0["seeds"]["arm_codes"] == {"positive": 1, "null_A": 2, "null_B": 3, "artifact_null": 4}
     assert g0["series_duration_s"] == 240 and g0["generation_burn_in_s"] == 4
     assert g0["backend"] == "numba" and g0["tuning_level_index"] == 2 and g0["n_tuning_series"] == 20
+
+
+# ---- F2 hooks (IMP-091): true states and the operating-point override -------------------------------------
+
+def test_keep_states_returns_the_true_states_on_the_observation_rows_and_changes_nothing_else(world):
+    c, table, grid = world
+    a = sg.generate_series(c, "positive", 2, grid, table, "pilot", with_truth=False)
+    b = sg.generate_series(c, "positive", 2, grid, table, "pilot", with_truth=False, keep_states=True)
+    assert a.states is None and b.states is not None
+    assert np.array_equal(a.segments[0], b.segments[0]) and a.starts == b.starts and a.m == b.m
+    n_obs = int(round((20 + 0) * 256))                       # series_duration_s of the short world (the two edge trims are removed)
+    assert b.states.shape[1:] == (2, 6) and abs(b.states.shape[0] - n_obs) <= 2
+    # independent route: the observed potential y1 - y2 of node 1, mixed with m, correlates with the true state difference
+    pot = b.states[:, :, 1] - b.states[:, :, 2]
+    assert np.isfinite(pot).all() and pot.std(axis=0).min() > 0
+    rows = sg.observation_rows(c, b.states.shape[0])
+    assert rows[1] - rows[0] == round(c["g0"]["generation_fs_hz"] / c["preprocessing"]["observation_fs_hz"])
+
+
+def test_operating_point_override_is_used_verbatim(world):
+    c, table, grid = world
+    op = {"index": -1, "p": 131.0, "input_sd_factor": 2.0, "noise_share": 0.5, "regime": sg.LIMIT_CYCLE, "recording": "constructed",
+          "target": [], "distance": 0.0}
+    s = sg.generate_series(c, "positive", 100, grid, table, "pilot", level_index=3, with_truth=False, operating_point=op)
+    assert s.operating_point["p"] == 131.0 and s.operating_point["input_sd_factor"] == 2.0 and s.level_index == 3
+    assert s.gains == (sg.level_gain(c, 3), sg.level_gain(c, 3))
+
+
+def test_true_states_are_aligned_with_the_observed_segments(world):
+    c, table, grid = world
+    s = sg.generate_series(c, "null_A", 1, grid, table, "pilot", with_truth=False, keep_states=True)
+    seg, start = np.asarray(s.segments[0]), int(s.starts[0])
+    n = seg.shape[1]
+    pot = s.states[start:start + n, :, 1] - s.states[start:start + n, :, 2]
+    mix = pot[:, 0] + s.m * pot[:, 1]
+    corr = {lag: np.corrcoef(seg[0, 300:-300], np.roll(mix, lag)[300:-300])[0, 1] for lag in range(-6, 7)}
+    best = max(corr, key=corr.get)
+    assert best == 0 and corr[0] > 0.4, corr
