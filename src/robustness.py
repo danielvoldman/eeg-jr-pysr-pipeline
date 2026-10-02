@@ -424,10 +424,26 @@ def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path is not None and Path(path).is_file() else None
 
 
+def _c1_worker(payload):
+    """Top-level (Windows spawn): one recording's forward-filter runs (score_recording); the frozen equation travels as its
+    document and is rebuilt here (IMP-085)."""
+    from threadpoolctl import threadpool_limits
+    rec, cfg, frozen_doc, frozen_sha, filter_name, cache_dir = payload
+    residual = None
+    if frozen_doc is not None:
+        from src import regression
+        residual = regression.FrozenEquation(doc=frozen_doc, sha256=frozen_sha).residual()
+    with threadpool_limits(limits=1):
+        return score_recording(rec, cfg, residual=residual, filter_name=filter_name, cache_dir=cache_dir,
+                               equation_sha=frozen_sha)
+
+
 def run_c1(cfg, root, seed, *, pilot, confirmatory=False, loader=None, pilot_ids=None, frozen=None, use_cache=True,
-           force=False, filter_name=None):
+           force=False, filter_name=None, n_jobs=None):
     """C1 for one split seed. Pilot mode: the internal-test pilot subjects only (mechanics), results/pilot/. The recordings
-    are read only after the plan, the baseline files and the frozen equation have been checked."""
+    are read only after the plan, the baseline files and the frozen equation have been checked. The recordings are loaded
+    in this process (the guard stays here) and the filter runs go to the loky pool (n_jobs; None = the pool size of the
+    affinity, IMP-085); the result does not depend on the number of workers."""
     from src import regression, tuning
     root = Path(root)
     plan = resolve_subjects(cfg, root, seed, pilot=pilot, confirmatory=confirmatory, pilot_ids=pilot_ids)
@@ -447,7 +463,7 @@ def run_c1(cfg, root, seed, *, pilot, confirmatory=False, loader=None, pilot_ids
         loader = tuning.make_real_loader(cfg, root, plan.pilot_ids, allow_all=plan.allow_all)
     loader = guarded_loader(loader, plan)
     cache_dir = (root / cfg["paths"]["cache_dir"] / cfg["statistics"]["c1"]["cache_subdir"]) if use_cache else None
-    rows, runs, skipped = [], {}, []
+    rows, runs, skipped, recs = [], {}, [], []
     for sid in plan.ids:
         if sid not in scores:
             skipped.append({"subject": sid, "reason": "not scored by the baseline (see its skipped_subjects)"})
@@ -455,9 +471,14 @@ def run_c1(cfg, root, seed, *, pilot, confirmatory=False, loader=None, pilot_ids
         res = loader(sid)
         if res["reason"] is not None:
             raise GuardError(f"{sid} was scored by the baseline but the loader now says: {res['reason']}")
-        rec = {"id": sid, "segments": res["segments"], "starts": res["starts"], "key": res.get("key")}
-        runs[sid] = score_recording(rec, cfg, residual=residual, filter_name=filter_name, cache_dir=cache_dir,
-                                    equation_sha=None if frozen is None else frozen.sha256)
+        recs.append({"id": sid, "segments": res["segments"], "starts": res["starts"], "key": res.get("key")})
+    fdoc = frozen.doc if m3_mode == "scored" else None
+    fsha = None if frozen is None else frozen.sha256
+    fname_run = passes.resolve_filter(cfg, filter_name)
+    payloads = [(r, cfg, fdoc, fsha, fname_run, cache_dir) for r in recs]
+    for r, out in zip(recs, _map(_c1_worker, payloads, cfg, n_jobs)):
+        sid = r["id"]
+        runs[sid] = out
         rows.append(subject_scores(sid, cfg, scores[sid], runs[sid], m3_mode))
         log.info("C1 %s: %s %s", sid, rows[-1]["status"], rows[-1]["reason"] or "")
     n_boot = int(cfg["statistics"]["bootstrap_B_pilot" if pilot else "bootstrap_B"])
@@ -1188,4 +1209,161 @@ def run_diagnostics(cfg, root, seed, *, pilot, confirmatory=False, loader=None, 
     path = diagnostics_output_path(cfg, root, seed, pilot)
     status = write_c1(path, _clean(doc), force=force)
     log.info("diagnostics, split seed %s: %s (%s)", seed, status, path)
+    return {"doc": doc, "path": path, "status": status}
+
+
+# ==== G3: C2 aggregation (IMP-085) ================================================================================
+
+def c2_recurrence(ens, frozen_doc, cfg):
+    """C2(a) (§8.4, §15.1): the signatures are recomputed from each refit's equation text (a stored set that disagrees is an
+    error), the count of refits per signature is taken over ALL refits (a refit with no term or a crashed one has an empty
+    set and stays in the denominator), a signature is stable if it appears in at least ceil(0.7 n) refits, and C2(a) holds
+    if some stable signature is in the primary equation. An ensemble that does not hold exactly the expected number of
+    refits is refused (never computed on a partial ensemble). frozen_doc None: a is undetermined."""
+    from src import regression
+    n_exp = int(ens["n_refits_expected"])
+    cfg_n = int(cfg["pysr"]["ensemble"]["n_refits_pilot" if ens["pilot"] else "n_refits"])
+    if n_exp != cfg_n:
+        raise RobustnessError(f"the ensemble expects {n_exp} refits but the configuration says {cfg_n}")
+    refits = ens["refits"]
+    if len(refits) != n_exp or sorted(r["k"] for r in refits) != list(range(1, n_exp + 1)):
+        raise RobustnessError(f"the ensemble holds {len(refits)} refits, expected exactly {n_exp}: refusing a partial ensemble")
+    sets = []
+    for r in refits:
+        if r["failed"] or r["no_term"]:
+            sig = frozenset()
+        else:
+            sig = regression.term_signatures(r["equation"])
+        if frozenset(r["signatures"]) != sig:
+            raise RobustnessError(f"refit {r['k']}: the stored signatures differ from the recomputed ones")
+        sets.append(sig)
+    rec = regression.signature_recurrence(sets, cfg)
+    primary = None
+    if frozen_doc is not None:
+        primary = frozenset() if frozen_doc["no_term"] else regression.term_signatures(frozen_doc["equation"])
+        if frozenset(frozen_doc.get("signatures", [])) != primary:
+            raise RobustnessError("the frozen equation's stored signatures differ from the recomputed ones")
+    common = sorted(set(rec["stable"]) & primary) if primary is not None else None
+    return {"n_refits": rec["n_refits"], "needed": rec["needed"], "counts": dict(sorted(rec["counts"].items())),
+            "stable": rec["stable"], "n_failed": int(sum(r["failed"] for r in refits)),
+            "n_no_term": int(sum(r["no_term"] for r in refits)),
+            "primary_signatures": None if primary is None else sorted(primary), "stable_in_primary": common,
+            "a_passed": None if primary is None else bool(common)}
+
+
+def c2_seed_verdicts(c1_docs):
+    """{seed: True / False / None}: the primary matched-set C1 verdict of each seed's c1 file (IMP-085); None when the file
+    is missing or made no verdict (no frozen equation)."""
+    return {int(s): (None if d is None else d["c1_verdict"]["passed"]) for s, d in c1_docs.items()}
+
+
+def c2_seed_rule(verdicts, cfg):
+    """C2(b): C1 passes in at least c2_min_seeds_passing_c1 of the n_split_seeds_total seeds. Three-valued: True once enough
+    seeds passed, False once too many failed for the rest to reach the minimum, else None (undetermined); a missing or
+    undecided seed is neither a pass nor a fail."""
+    total = int(cfg["split"]["n_split_seeds_total"])
+    need = int(cfg["statistics"]["criteria"]["c2_min_seeds_passing_c1"])
+    if len(verdicts) != total:
+        raise RobustnessError(f"C2(b) needs {total} seeds, got {len(verdicts)}")
+    n_pass = sum(v is True for v in verdicts.values())
+    n_fail = sum(v is False for v in verdicts.values())
+    value = True if n_pass >= need else (False if n_fail > total - need else None)
+    return {"passed": value, "n_passed": int(n_pass), "n_failed": int(n_fail),
+            "n_undetermined": int(sum(v is None for v in verdicts.values())), "needed": need, "of": total}
+
+
+def c1_seed_p(c1_doc):
+    """Raw p of the Holm member c1_seed:<s> (IMP-080): the intersection-union p, the larger of the primary M3-vs-M2 and
+    M3-vs-M0 percentile p of that seed's c1 file. None when the file is missing or has no M3 comparison (no frozen
+    equation): a seed that was not run never gets a substituted p. A no-term seed has M3 equal to M2, p = 1."""
+    if c1_doc is None:
+        return None
+    c = c1_doc["primary"].get("comparisons", {})
+    if "M3_vs_M2" not in c or "M3_vs_M0" not in c:
+        return None
+    return float(max(c["M3_vs_M2"]["p"], c["M3_vs_M0"]["p"]))
+
+
+def c2_verdict(a, b):
+    """C2 = (a) AND (b), three-valued: False as soon as either part is False, True when both are, else None."""
+    if a is False or b is False:
+        return False
+    return True if (a is True and b is True) else None
+
+
+def run_c2(cfg, root, *, pilot, confirmatory=False, force=False):
+    """C2 from files only: the ensemble of the primary seed, each seed's frozen equation and c1 file. Nothing is refitted or
+    re-scored here. Guard: pilot and confirmatory inputs are never mixed (the pilot flag and mechanics_only of every file
+    must match the mode); every file must carry the seed it is read for and every c1 file the sha256 of that seed's frozen
+    equation; the ensemble's subjects must be on the training side of the primary split; a confirmatory run needs the
+    gate and refuses mechanics-only inputs. Missing inputs make the part they feed undetermined, never False."""
+    import main as main_mod
+    from src import regression, tuning
+    root = Path(root)
+    if pilot and confirmatory:
+        raise GuardError("confirmatory aggregation is not a pilot run")
+    if not pilot and confirmatory is not True:
+        raise GuardError("a non-pilot run must pass confirmatory=True explicitly")
+    gate = None if pilot else tuning.check_gate(cfg, root)
+    primary = int(cfg["split"]["primary_seed"])
+    eseed = int(cfg["statistics"]["c2"]["ensemble_seed"])
+    seeds = [primary] + [int(s) for s in cfg["split"]["extra_seeds"]]
+    inputs, problems = {}, []
+
+    def check_flags(doc, name, seed):
+        if int(doc["split_seed"]) != int(seed):
+            raise GuardError(f"{name}: split seed {doc['split_seed']} is not {seed}")
+        if bool(doc.get("pilot")) != bool(pilot):
+            raise GuardError(f"{name}: a {'pilot' if doc.get('pilot') else 'full'} file in a {'pilot' if pilot else 'full'} run")
+        if not pilot and doc.get("mechanics_only"):
+            raise GuardError(f"{name}: a mechanics-only file in a confirmatory run")
+
+    epath = regression.ensemble_path(cfg, root, eseed, pilot)
+    ens = None
+    if epath.is_file():
+        ens = regression.load_ensemble(epath)
+        check_flags(ens, epath.name, eseed)
+        split = main_mod.load_split(eseed, root, cfg)
+        regression.check_training_ids(sorted({s for r in ens["refits"] for s in r["half_subjects"]}), split)
+        inputs["ensemble"] = {"file": epath.name, "sha256": ens["sha256"]}
+    else:
+        problems.append(f"{epath.name}: not found")
+    frozen, c1_docs = {}, {}
+    for s in seeds:
+        fpath = regression.frozen_equation_path(cfg, root, s, pilot)
+        fz = regression.load_frozen_equation(fpath) if fpath.is_file() else None
+        if fz is not None:
+            check_flags(fz.doc, fpath.name, s)
+        frozen[s] = fz
+        cpath = output_path(cfg, root, s, pilot)
+        if not cpath.is_file():
+            c1_docs[s] = None
+            problems.append(f"{cpath.name}: not found")
+            continue
+        c1 = json.loads(cpath.read_text(encoding="utf-8"))
+        check_flags(c1, cpath.name, s)
+        if c1["m3"]["frozen_equation_sha256"] != (None if fz is None else fz.sha256):
+            raise GuardError(f"{cpath.name}: its frozen-equation sha256 is not that of {fpath.name}")
+        c1_docs[s] = c1
+        inputs[f"c1_{s}"] = {"file": cpath.name, "sha256": _sha(cpath)}
+        if fz is not None:
+            inputs[f"frozen_{s}"] = {"file": fpath.name, "sha256": fz.sha256}
+    rec = None
+    if ens is not None:
+        rec = c2_recurrence(ens, None if frozen[eseed] is None else frozen[eseed].doc, cfg)
+    verdicts = c2_seed_verdicts(c1_docs)
+    b = c2_seed_rule(verdicts, cfg)
+    a_val = None if rec is None else rec["a_passed"]
+    raw_p = {f"c1_seed:{s}": c1_seed_p(c1_docs[s]) for s in seeds if s != primary}
+    doc = {"schema": int(cfg["statistics"]["c2"]["schema_version"]), "split_seed": primary, "pilot": bool(pilot),
+           "mechanics_only": bool(pilot), "mode": "pilot" if pilot else "confirmatory",
+           "a_signature_recurrence": rec, "b_seed_rule": dict(b, verdicts={str(k): v for k, v in verdicts.items()}),
+           "c2_verdict": {"passed": c2_verdict(a_val, b["passed"]),
+                          "reason": "(a) and (b), three-valued; a missing input leaves its part undetermined"},
+           "holm_raw_p": raw_p, "missing_inputs": problems, "inputs": inputs,
+           "gate_low_confidence": None if gate is None else gate.get("low_confidence")}
+    doc["provenance"] = _provenance(cfg, root, primary, {})
+    path = _result_path(cfg, root, primary, pilot, "c2")
+    status = write_c1(path, _clean(doc), force=force)
+    log.info("C2: %s (%s)", status, path)
     return {"doc": doc, "path": path, "status": status}

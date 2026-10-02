@@ -533,6 +533,31 @@ def test_e2e_rerun_is_unchanged_and_uses_the_cache(e2e):
     assert len(list(cache.glob("*_M3_*.npz"))) == 4 and len(list(cache.glob("*_M2_*.npz"))) == 4
 
 
+def test_e2e_result_does_not_depend_on_the_number_of_workers(e2e):
+    """The e2e scored file was written by the loky pool (n_jobs None); a one-worker re-run, off the cache, must reproduce
+    it exactly (write_c1 reports 'unchanged' only for an identical result apart from provenance; IMP-085)."""
+    again = rb.run_c1(CFG, e2e["root"], 42, pilot=True, loader=e2e["loader"], pilot_ids=e2e["pilot"], use_cache=False, n_jobs=1)
+    assert again["status"] == "unchanged"
+    pooled = rb.run_c1(CFG, e2e["root"], 42, pilot=True, loader=e2e["loader"], pilot_ids=e2e["pilot"], use_cache=False, n_jobs=2)
+    assert pooled["status"] == "unchanged"
+
+
+def test_e2e_pooled_scores_belong_to_their_own_subject(e2e):
+    """Each subject's M1 and M2 score equals an in-process serial score_recording of that subject (a pool that returned
+    the runs in the wrong order, or for the wrong subject, would break this; IMP-085)."""
+    bpath = baseline.output_paths(CFG, e2e["root"], 42, True)[1]
+    base = baseline.load_scores(bpath)
+    rows = {r["id"]: r for r in e2e["scored"]["doc"]["per_subject"] if r["status"] == "matched"}
+    assert rows
+    for sid, row in rows.items():
+        res = e2e["loader"](sid)
+        runs = rb.score_recording({"id": sid, "segments": res["segments"], "starts": res["starts"]}, CFG)
+        serial = rb.subject_scores(sid, CFG, base[sid], runs, "absent")
+        for v in ("M1", "M2"):
+            assert row["scores"][v] == pytest.approx(serial["scores"][v], rel=1e-12)
+    assert len({round(r["scores"]["M2"], 9) for r in rows.values()}) > 1          # the subjects really differ
+
+
 def test_e2e_no_term_equation_makes_m3_equal_to_m2_and_c1_fails(e2e, monkeypatch):
     root = e2e["root"]
     rec = _record()
@@ -545,6 +570,17 @@ def test_e2e_no_term_equation_makes_m3_equal_to_m2_and_c1_fails(e2e, monkeypatch
     c = d["primary"]["comparisons"]["M3_vs_M2"]
     assert c["mean"] == 0.0 and c["ci"] == [0.0, 0.0]
     assert d["divergence"]["per_variant"]["M3"]["note"].startswith("identical to M2")
+
+
+def test_e2e_a_different_frozen_equation_never_reuses_a_cached_m3(e2e):
+    root = e2e["root"]
+    rec = _record()
+    rec.update(equation="tanh(u_src)", signatures=["tanh(u_src)"])
+    regression.write_frozen_equation(regression.frozen_equation_path(CFG, root, 42, True),
+                                     regression.build_frozen_document(rec, CFG, REPO, 42, True), force=True)
+    other = rb.run_c1(CFG, root, 42, pilot=True, loader=e2e["loader"], pilot_ids=e2e["pilot"], force=True)["doc"]
+    assert other["m3"]["equation"] == "tanh(u_src)"
+    assert other["primary"]["comparisons"]["M3_vs_M2"]["mean"] != e2e["scored"]["doc"]["primary"]["comparisons"]["M3_vs_M2"]["mean"]
 
 
 def test_e2e_loader_asked_for_an_unplanned_subject_is_refused(e2e):

@@ -453,9 +453,11 @@ Note (2026-10-01): partly done inside G1. Done: 10,000 resamples (pilot 100) fro
 
 Note (2026-10-01, G2 stage; IMP-080): the Holm FAMILY is now defined: 11 members (2 + 3 + 2 + 4, option c, departs from the four-bullets wording of section 14), registry robustness.holm_members, statistics.holm_family_size = 11, and robustness.holm_report refuses to give any adjusted value until all 11 raw p exist (status partial_family). Still NOT done, so the box stays open: the members of G3 (c1_seed:43 to 46) and G5 (freerun:2s, 5s, 10s) do not exist yet, hence no adjusted value; the adjustment runs once in G8. The cluster bootstrap is used by C3 (G4 below) through whole-pair resampling of the pre-drawn matrix.
 
-### [ ] G3. C2 aggregation
+### [~] G3. C2 aggregation (machinery done; the real C2 waits for the ensemble and five frozen equations)
 Read: §15.
 Done when the ≥ 70% signature recurrence and the "C1 passes in ≥ 4 of 5 seeds" rule are both computed.
+
+Note (2026-10-01; IMP-085): both rules are computed by robustness.run_c2 from files (c2_recurrence, c2_seed_rule, c1_seed_p, c2_verdict), three-valued; regression.py persists the ensemble (write_ensemble, load_ensemble, crashed refits counted as no term, checkpoint callback); run_c1 is parallel over recordings (loky, worker-count independent). tests/test_c2.py (34 tests) and 3 tests in test_robustness.py; 24 mutation checks. NOT done, so the box is [~]: no ensemble and no frozen equation exist (E5 PySR stage with filter A has not run), so every real input is missing and the verdict is undetermined; the four seed-43 to 46 c1 files, baselines and primary fits do not exist; the c1_seed Holm members have no p yet.
 
 ### [~] G4. C3 ICC (machinery done on pilot data; the confirmatory M3 estimate waits for a frozen equation)
 Read: §11.3, §15.

@@ -723,19 +723,95 @@ def run_fit(rows_by_subject, fit_ids, val_ids, split, split_seed, cfg, *, role, 
     return FitResult(sel, entries, z, seeds, len(fit_rows), len(val_rows), secs, record)
 
 
-def run_ensemble(rows_by_subject, train_ids, split, split_seed, cfg, *, n_refits=None, role="refit", **kw):
+def run_ensemble(rows_by_subject, train_ids, split, split_seed, cfg, *, n_refits=None, role="refit", on_refit=None, **kw):
     """The C2 refit ensemble (§8.2): n half-sample refits (25; the pilot passes 3), each with the same
-    selection rule, then the signature recurrence. Returns {"refits": [record], "recurrence": ...}."""
+    selection rule, then the signature recurrence. Returns {"refits": [record], "recurrence": ...}.
+
+    A refit that crashes (any exception except this module's own refusals) counts as 'no term' with an empty signature
+    set and is reported (IMP-085): the record carries failed=True and the error text, the recurrence carries n_failed and
+    n_no_term. A refit with no usable front is already 'no term' by select_equation. on_refit(record) is called after
+    every refit (a checkpoint writer for the multi-hour run)."""
     draws = draw_ensemble(train_ids, split, split_seed, cfg, n_refits=n_refits)
     records, sig_sets = [], []
     for d in draws:
-        res = run_fit(rows_by_subject, d["fit"], d["val"], split, split_seed, cfg, role=role, k=d["k"], **kw)
-        res.record["half_subjects"] = d["subjects"]
-        records.append(res.record)
-        sig_sets.append(frozenset(res.record["signatures"]))
-        log.info("refit %d: %s (complexity %s, no_term %s, %.0f s)", d["k"], res.record["equation"],
-                 res.record["complexity"], res.record["no_term"], res.seconds)
-    return {"refits": records, "recurrence": signature_recurrence(sig_sets, cfg)}
+        try:
+            res = run_fit(rows_by_subject, d["fit"], d["val"], split, split_seed, cfg, role=role, k=d["k"], **kw)
+            record = res.record
+            log.info("refit %d: %s (complexity %s, no_term %s, %.0f s)", d["k"], record["equation"],
+                     record["complexity"], record["no_term"], res.seconds)
+        except RegressionError:
+            raise
+        except Exception as exc:                                   # a crashed refit is reported, never hidden (IMP-085)
+            log.warning("refit %d failed (%r): counted as no term", d["k"], exc)
+            record = {"role": role, "k": d["k"], "seeds": d["seeds"], "failed": True, "error": repr(exc), "no_term": True,
+                      "reason": f"fit failed: {exc!r}", "equation": None, "complexity": None, "val_loss": None,
+                      "signatures": [], "fit_subjects": list(d["fit"]), "val_subjects": list(d["val"]), "front": []}
+        record["half_subjects"] = d["subjects"]
+        record.setdefault("failed", False)
+        records.append(record)
+        sig_sets.append(frozenset(record["signatures"]))
+        if on_refit is not None:
+            on_refit(record)
+    rec = signature_recurrence(sig_sets, cfg)
+    rec["n_failed"] = int(sum(r["failed"] for r in records))
+    rec["n_no_term"] = int(sum(r["no_term"] for r in records))
+    return {"refits": records, "recurrence": rec}
+
+
+# ---- the ensemble on disk (C2, G3; §8.2, §18.1; IMP-085) -------------------------------------------------------
+
+def ensemble_path(cfg, root, seed, pilot):
+    base = cfg["paths"]["pilot_results_dir"] if pilot else cfg["paths"]["outputs_dir"]
+    return Path(root) / base / cfg["pysr"]["ensemble"]["output_pattern"].format(seed=seed)
+
+
+def build_ensemble_document(out, cfg, root, split_seed, pilot):
+    """The on-disk form of a run_ensemble result: every refit record (equation, signatures, no_term, failed, subjects, seeds,
+    front) plus provenance. Never imports PySR."""
+    from src import tuning
+    head, dirty = tuning._git_state(root)
+    cfg_file = Path(root) / "config.yml"
+    n_exp = int(cfg["pysr"]["ensemble"]["n_refits_pilot" if pilot else "n_refits"])
+    return {"schema": int(cfg["pysr"]["ensemble"]["schema_version"]), "split_seed": int(split_seed), "pilot": bool(pilot),
+            "n_refits_expected": n_exp, "refits": out["refits"], "recurrence": out["recurrence"],
+            "provenance": {"git_commit": head, "git_dirty": dirty,
+                           "code_sha256": hashlib.sha256((Path(__file__).resolve()).read_bytes()).hexdigest(),
+                           "config_yml_sha256": hashlib.sha256(cfg_file.read_bytes()).hexdigest() if cfg_file.is_file() else None}}
+
+
+def write_ensemble(path, doc, force=False):
+    """Write once (same rule as the frozen equation): an identical result is left alone, a different one is refused unless
+    force (a deviation). Returns "written" or "unchanged"."""
+    path = Path(path)
+    new = json.loads(json.dumps(doc))
+    if path.is_file() and not force:
+        strip = lambda d: {k: v for k, v in d.items() if k != "provenance"}              # noqa: E731
+        if strip(json.loads(path.read_text(encoding="utf-8"))) == strip(new):
+            return "unchanged"
+        raise RegressionError(f"{path} exists with a different ensemble; pass force to overwrite (a deviation)")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(new, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
+    tmp.replace(path)
+    return "written"
+
+
+def load_ensemble(path):
+    """Read an ensemble file (PySR is never imported). Raises on a missing file or an incomplete document."""
+    path = Path(path)
+    if not path.is_file():
+        raise RegressionError(f"{path} does not exist")
+    raw = path.read_bytes()
+    doc = json.loads(raw.decode("utf-8"))
+    for key in ("schema", "split_seed", "pilot", "n_refits_expected", "refits"):
+        if key not in doc:
+            raise RegressionError(f"{path} has no {key!r}")
+    for r in doc["refits"]:
+        for key in ("k", "no_term", "failed", "equation", "signatures", "half_subjects"):
+            if key not in r:
+                raise RegressionError(f"{path}: refit record without {key!r}")
+    doc["sha256"] = hashlib.sha256(raw).hexdigest()
+    return doc
 
 
 # ---- determinism and turbo comparison (§8.2, §16.5.2) -------------------------------------------------------

@@ -398,6 +398,9 @@ pysr:
     n_refits: {value: 25, prov: locked, ref: "§8.2"}
     subject_fraction: {value: 0.5, prov: locked, ref: "§8.2"}
     refit_inside_bootstrap: {value: false, prov: locked, ref: "§8.2"}
+    n_refits_pilot: {value: 3, prov: locked, ref: "§17", note: "pilot: 3 ensemble refits to test the mechanism"}
+    output_pattern: {value: "ensemble_{seed}.json", prov: placeholder, ref: "§18.1, IMP-085", note: "the refit ensemble of the primary split seed (C2 only), under paths.outputs_dir (pilot: paths.pilot_results_dir); written only by regression.write_ensemble"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-085"}
   signature_rule: {value: "sympy additive components; multiplicative constants set to 1, additive constants inside function arguments set to 0; simplify", prov: locked, ref: "§8.4"}
   frozen_equation:
     output_pattern: {value: "frozen_equation_{seed}.json", prov: placeholder, ref: "§18.1, IMP-077", note: "the primary fit's frozen equation of one split seed, under paths.outputs_dir (pilot: paths.pilot_results_dir); written only by regression.write_frozen_equation"}
@@ -576,6 +579,10 @@ statistics:
     p_rule: {value: "one_plus_k_over_n_plus_one", prov: placeholder, ref: "§14, IMP-082", note: "p = (1 + k) / (N + 1), k = surrogates whose statistic is at least the real one, a diverged surrogate counting as at least as large (the literal share of §14 would allow p = 0)"}
     unit: {value: "clean_segment_and_channel", prov: placeholder, ref: "§14, IMP-082", note: "each clean segment of each channel gets its own AAFT surrogate; starts and gaps are kept"}
     surrogates_per_task: {value: 5, prov: placeholder, ref: "§16.5.1, IMP-082", note: "pool task size only; no effect on results"}
+  c2:
+    output_pattern: {value: "c2_{seed}.json", prov: placeholder, ref: "§18.1, IMP-085", note: "under paths.results_dir (pilot: paths.pilot_results_dir)"}
+    schema_version: {value: 1, prov: placeholder, ref: "IMP-085"}
+    ensemble_seed: {value: 42, prov: locked, ref: "§8.2, §11.1, IMP-085", note: "the refit ensemble runs on the primary split seed only"}
   criteria:
     c2_signature_recurrence_min: {value: 0.70, prov: placeholder, ref: "§15.1"}
     c2_min_seeds_passing_c1: {value: 4, prov: locked, ref: "§15.1", note: "of 5"}
