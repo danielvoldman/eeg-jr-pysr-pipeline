@@ -516,9 +516,9 @@ Note (2026-10-02): runners, flags, resumability, step plans and the phase-1 piec
 Read: §7.5, §9.2, §10.2, §20, DEV-003, DEV-005, DEV-006, IMP-069, IMP-086, IMP-090.
 Steps, in order, each its own commit: (1) docs and config leaves, BEFORE any run (DEV-007, IMP-091); (2) dwell and parameter clause in the kernels, dwell off = legacy bit for bit, tests and mutations; (3) the selection test on seed block 96000 (acceptance: sensitivity >= 0.9, false positives <= 0.05, stop and report on failure, no re-picking); (4) only if it passes: one fresh G0 pilot round (round 1) for filter A at q_fixed, old gate files and divergence-dependent pilot files to results/pilot/superseded/. A null failure afterwards is a legitimate hard stop and is reported, never loosened.
 
-### [ ] H1. Nine figures
+### [~] H1. Nine figures (reduced scope, IMP-099: Fig 2 from the gate plus labelled placeholders)
 Read: §19.
-Done when:
+Done when (reduced to Fig 2 plus labelled placeholders for the hard-stop outcome, IMP-099; Figs 1 and 3 to 9 are placeholders):
 - All 9 figures are PNGs at 300 DPI.
 - A failed stage produces a labelled placeholder figure.
 - The script reads only `results/` and `outputs/gate.json`.
@@ -558,7 +558,7 @@ Done when:
 
 ## Stage K: Full run
 
-### [ ] K0. Formal G0 null arms, UKF-only (IMP-094; approved 2026-10-02)
+### [x] K0. Formal G0 null arms, UKF-only (IMP-094; approved 2026-10-02): CLOSED at the hard stop
 Read: §5.2, §9.2, §9.4, §15.1, §18.1, §20; IMP-069, IMP-090, IMP-093, IMP-094.
 Steps, in order: (1) docs commit (IMP-094) BEFORE any run; (2) driver `python -m src.synthetic_gate --g0-null-arms`, seed ledger, `not_run` state, main.py / tuning.py gate fixes, tests with mutations, own commit; (3) `--estimate-only` (preprocessing of the 78 training subjects, regime grid, series), STOP and ask above about 1 h in total, no fall back to the pilot table; (4) the single formal run (block 92000, Null A and Null B, 60 each, filter A at q_fixed, legacy rule, delta 1.08); the cited artifact-only null of block 94000 comes from the pilot (burnt). Writes results/g0_null_arms_r0.json always and outputs/gate.json only on a null failure.
 Note (2026-10-02, step 2 done: IMP-095): driver, ledger, not_run state, main.py / tuning.py gate fixes built; tests/test_formal_null_arms.py (35 tests, 26 mutations killed). Steps 3 and 4 pending.
@@ -566,13 +566,15 @@ Note (2026-10-02, IMP-096, IMP-097): the first formal run (block 92000) was kill
 Note (2026-10-02, IMP-098): round 1 (block 102000) ran once: HARD STOP, Null A 51 of 60 and Null B 55 of 60 false positives (gain half), outputs/gate.json hard_stop true, complete false; no phase1.done. The box stays open until the owner decides between the write-up and a fix with round 2.
 Done when: the formal document exists with per-arm dropped / outside delta / false positives / bound / flag-off split, the ledger shows the claim, and the outcome (hard stop and write-up, or PySR stage) is recorded in HANDOFF.
 
-- [ ] Phase 1: preprocessing, then G0 (can run alone over one or two nights)
-- [ ] Phase 2
-- [ ] Phase 3
-- [ ] Phase 4
+- [ ] Phase 1: preprocessing, then G0. NOT RUN to completion: G0 hard stop (IMP-098); the owner closed the project with a write-up (IMP-099)
+- [ ] Phase 2: not run (G0 hard stop)
+- [ ] Phase 3: not run (G0 hard stop)
+- [ ] Phase 4: not run (G0 hard stop); figures run through python -m src.figures (IMP-099)
 
 ## Stage L: Release files
 
-- [ ] `requirements.txt`, pinned with `pip freeze`, including the exact PySR and filterpy versions (§18.4)
-- [ ] `README.md` (§18.4)
-- [ ] `LICENSE` (optional)
+- [x] `requirements.txt`, pinned with `pip freeze`, including the exact PySR and filterpy versions (§18.4)
+- [x] `README.md` (§18.4)
+- [x] `LICENSE` (optional; MIT, Daniel Voldman, 2026)
+
+Note (2026-10-02, IMP-099): Stage L done (f8ea1c6). H1 reduced scope done: src/figures.py (be83d18), 22 tests, 12 mutations. K0 closed: outcome recorded in HANDOFF (hard stop, write-up docs/G0_HARD_STOP_REPORT.md). Local tag g0-hard-stop-v1.

@@ -1,4 +1,4 @@
-# HANDOFF.md (2026-10-02, updated after G8 and H0; verify against git and the tests)
+# HANDOFF.md (2026-10-02, FINAL STATE after the G0 hard stop and the closing work, IMP-099; verify against git and the tests)
 
 Source of truth for the science: PREREGISTRATION.md (planning doc v0.6, tag prereg-v0.6). Standing rules: CLAUDE.md. Build order: PLAN.md. Every deviation (DEV-xxx) and implementation clarification (IMP-xxx): DEVIATIONS.md. Old entries are never edited except their Commit column; corrections go in new entries.
 
@@ -12,6 +12,9 @@ Coupled two-node Jansen-Rit model fit to two bipolar resting-state EEG channels 
 - Owner writes in capitals, wants short answers, gets frustrated by slowness; be honest about mistakes; never change a LOCKED value without a deviation entry; stop and ask where the document leaves a value open. A proof of concept with an honest "detectable, not exact" result is an accepted outcome.
 - Real-data development uses ONLY the 12 pilot subjects (training side in all 5 seeds). Never read test subjects.
 - Do not re-litigate: Wilson-Cowan, single-channel E/I split, open-form PySR, UDE, 4-phase layout, section 16.5.3 not-adopted list, Jansen-Rit choice.
+
+## FINAL STATE (IMP-099, 2026-10-02)
+The project is CLOSED at the preregistered G0 hard stop. Owner decision: write up the negative result; no round 2, no fix, no loosening; the pilot stays mechanics-only. C1 to C4 were NOT ATTEMPTED (neither failed nor a null result). Nothing is pending. Closing files: docs/G0_HARD_STOP_REPORT.md (numbers tied to their source files and sha256 by tests/test_closing_report.py), README.md, requirements.txt (pinned pip freeze), LICENSE (MIT, Daniel Voldman, 2026), src/figures.py (Fig 2 from gate.json and results/g0_null_arms_r1.json; Figs 1 and 3 to 9 labelled placeholders; `python -m src.figures --figure N | --all`; `main.py --phase 4` stays refused). Local tag g0-hard-stop-v1 (not pushed; no remote is configured). Burnt or consumed seed blocks: 92000 (round 0, lost, no result seen), 94000, 96000, 99000, 99500; 102000 used once (the formal result). Full suite at the final commit: 1224 passed, 1 skipped (tests/test_state_space.py:476, the C1 writer test), 3 deselected (pysr marker), 16 min. Later work, if ever: a pipeline fix needs the owner's approval, its own DEV entry and fresh-seed round 2 (blocks 112000 and 114000, positive control included, section 9.4).
 
 ## State (verify: git log --oneline -15; git status; pytest -rs -q)
 K0 (2026-10-02): FORMAL G0 NULL ARMS DONE, HARD STOP (IMP-094 to IMP-098). Round 0 (block 92000) was lost to an operator timeout and stays burnt with no result seen; round 1 (block 102000, UKF-only, filter A, q 1e-2, legacy rule, delta 1.08, 60 per arm, 78-subject table) ran once, detached, with per-series checkpoints: Null A 51 of 60 false positives (39 dropped, 12 outside delta; bound 0.9195), Null B 55 of 60 (39 dropped, 16 outside; bound 0.9666); with the rule off 33 and 43 of 60 are still outside delta; cited pilot artifact-only null 20 of 20 failed (94000 burnt). outputs/gate.json exists with hard_stop true, complete false (positive, contraction, stability, preprocessing bias not_run); no phase1.done; phase 2 is refused. Code 712365a (checkpoints, round 1), full suite 1184 passed / 1 skipped / 3 deselected. Nothing was tuned or loosened.
@@ -47,10 +50,7 @@ G3, G5, G7 (2026-10-02, pilot subjects only, machinery done, real content waits 
 - Seeds: split 42 (extra 43-46); G0 blocks 91000 pilot, 92000 full, 93000 tuning, 94000 preprocessing gate, +10000 per fresh-seed round.
 
 ## Next
-Stage letters follow PLAN.md (G3 = C2 aggregation, G5 = C4 free-run, G7 = section 5.2 sensitivity, G8 = summary files, H0 = phase wiring, H1 = figures). State 2026-10-02: the legacy first-crossing divergence rule is shipped (DEV-007 not adopted, IMP-093); the full suite is 1141 passed / 1 skipped / 3 deselected.
-1. DONE (K0, IMP-098): the formal null arms gave a HARD STOP (see State). Decision for the owner: write up the G0 hard stop (section 20: reported, never loosened), or approve a pipeline fix with its own DEV entry and fresh-seed round 2 (blocks 112000 / 114000; positive control and both nulls rerun, section 9.4). The PySR stage (item 2a) is not reachable: it needs both null arms to clear the gain half.
-2. Then, depending on the result: (a) only if both null arms pass, the PySR stage (IMP-090: E5 PySR stage on synthetic series with filter A, checkpointed, time one series first, stop above 12 h; then the real-data phase 2 pilot driver and the frozen equation); (b) if a null arm fails, the write-up of a G0 hard stop under section 20 (reported, never loosened, no further rule or delta change without the owner's approval, its own DEV entry and fresh seed round 2). H1 (figures) and Stage L follow either way.
-3. Open from section 21.2: noise-adaptive R (largely moot), OS affinity mask/SMT pairing (Windows, FF mask honoured by Julia), worker count 4/6/8 benchmark, Numba validation (passed in C5).
+Nothing is open. The write-up path was chosen (IMP-099). Stage letters follow PLAN.md; K0 is closed with the hard stop, the Phase 1 to 4 boxes stay unticked (not run: G0 hard stop), H1 is done in reduced scope (Fig 2 plus placeholders), Stage L is done. Open items of section 21.2 (noise-adaptive R, SMT pairing, worker count) are moot for a run that does not continue.
 
 ## Lessons
 - Claude Code sometimes ends its turn without printing a report; ask it to check git log/status and print results from files. Background jobs keep running.
@@ -60,4 +60,4 @@ Stage letters follow PLAN.md (G3 = C2 aggregation, G5 = C4 free-run, G7 = sectio
 
 ## Verify first
 git log --oneline --decorate -15 ; git status ; .\.venv\Scripts\python.exe -m pytest -rs -q ; git tag
-Expect a clean tree, 1141 passed / 1 skipped / 3 deselected, tag prereg-v0.6.
+Expect a clean tree, 1224 passed / 1 skipped / 3 deselected, tags prereg-v0.6 and g0-hard-stop-v1.
