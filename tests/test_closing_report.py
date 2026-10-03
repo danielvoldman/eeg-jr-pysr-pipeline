@@ -141,14 +141,11 @@ def test_imp101_numbers_in_report_and_deviations():
     report = report_text()
     d_rows = [l for l in report.splitlines() if l.rstrip().endswith("| IMP-101 |")]
     assert len(d_rows) == 3
-    d_text = " ".join(d_rows)
-    # the finding in section 7 repeats the oracle result, so only the derivative range and counts are compared there
+    d_text = re.sub(r"<!--.*?-->", "", " ".join(d_rows))  # visible text only: markers must not satisfy the check
     for num in IMP101_NUMBERS:
         assert num in row, ("DEVIATIONS IMP-101", num)
     for num in IMP101_NUMBERS:
-        assert num in d_text or num in report, ("report", num)
-    for num in ("88 of 100", "0.252", "10.4 SD", "87 of 88", "371.66", "141 ms", "129 ms", "6 of 12", "0.0016 to 0.0067", "0.28, 0.71, 0.70"):
-        assert num in d_text, ("section 4 rows", num)
+        assert num in d_text, ("section 4 rows, visible text", num)
 
 
 def test_imp101_wording_and_unknown():
@@ -156,5 +153,6 @@ def test_imp101_wording_and_unknown():
     assert "best case on clean true states and says nothing about filtered states" in report
     assert "Whether PySR recovers filtered-state residuals" in report
     assert "noise-driven regime while the data are limit-cycle" not in report
-    assert "D2 smoke (IMP-060)" in report
+    assert any(l.startswith("| D2 smoke (IMP-060) |") for l in report.splitlines())
+    assert not any(l.startswith("| D1/D2") for l in report.splitlines())
     assert "this docs commit" in imp101_row() or re.search(r"\b[0-9a-f]{7,40}\b", imp101_row().split("|")[-2])
