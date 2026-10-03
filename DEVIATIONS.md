@@ -130,6 +130,7 @@ This section covers any change to a LOCKED item at any time, and any change to a
 - Could this affect G0 or a C1-C4 verdict? How? Yes: every filter run's divergence status (G0 survivors, the null arms, the pass-1 and pass-2 exclusions, the matched sets and divergence counts of section 12, C3 pairs, the C4 stability condition, the G7 variants). All pilot mechanics files that depend on divergence are moved to results/pilot/superseded/ (never deleted) and regenerated only after the fresh G0 round; gate_A.json, g0_filter_comparison_A.json and g0_pilot_timing_A.json are superseded by the fresh round (IMP-091).
 - Approved by: Daniel Voldman, 2026-10-02 (plan approval with answers 1 to 7)
 - Commit: e35d28b (docs), 38a8963 (code). STATUS 2026-10-02: the selection test of IMP-091 FAILED (IMP-092); the code is in the tree but the rule is NOT accepted, and no fresh G0 round has been run
+| IMP-100 | 2026-10-02 | §18.3 | .gitignore carries one line beyond the §18.3 list | .gitignore carries one line beyond the section 18.3 list, .pytest_cache/ (pytest's cache, generated, never committed), added in Stage 0 (a035a06) without an entry. No 18.3 line was removed or altered. Audited 2026-10-02: 98 tracked files, none generated; optional hardening lines (*.partial, hall_of_fame*.csv*) considered and not added. Cosmetic; no effect on any result. | none | Daniel Voldman | this docs commit |
 
 **Entry template**
 
