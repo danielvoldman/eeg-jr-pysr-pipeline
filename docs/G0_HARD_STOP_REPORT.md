@@ -1,8 +1,8 @@
 # G0 hard stop: a preregistered negative result
 
-Project: two-node Jansen–Rit model, unscented Kalman filter and PySR residual on two bipolar resting-state EEG channels (OpenNeuro ds003775 v1.2.1). Specification: `PREREGISTRATION.md` v0.6 (tag `prereg-v0.6`). Decision record: `DEVIATIONS.md`, entries DEV-001 to DEV-007 and IMP-001 to IMP-099.
+Project: two-node Jansen–Rit model, unscented Kalman filter and PySR residual on two bipolar resting-state EEG channels (OpenNeuro ds003775 v1.2.1). Specification: `PREREGISTRATION.md` v0.6 (tag `prereg-v0.6`). Decision record: `DEVIATIONS.md`, entries DEV-001 to DEV-007 and IMP-001 to IMP-101.
 
-**How to read the numbers.** `results/` and `outputs/` are not committed (CLAUDE.md rule 4), so this file is the committed record. A number carries an invisible HTML-comment marker: either `src` (a field of a result file, hashed in the table of §8) or `doc` (text that must occur in a tracked document). `tests/test_closing_report.py` checks every marker. Numbers marked `doc` come from `DEVIATIONS.md` or `PLAN.md` as of commit `c96d2be`.
+**How to read the numbers.** `results/` and `outputs/` are not committed (CLAUDE.md rule 4), so this file is the committed record. A number carries an invisible HTML-comment marker: either `src` (a field of a result file, hashed in the table of §8) or `doc` (text that must occur in a tracked document). `tests/test_closing_report.py` checks every marker. Numbers marked `doc` come from `DEVIATIONS.md` or `PLAN.md` as of commit `c96d2be`, except the D1/D2 numbers, which come from `DEVIATIONS.md` IMP-101 (added after that commit).
 
 ## 1. Outcome in one paragraph
 
@@ -49,11 +49,14 @@ Gate state (`outputs/gate.json`): `hard_stop` true<!--src outputs/gate.json hard
 | E5/E6 (operating points) | At matched real-like operating points every positive series is dropped and the nulls fail; at the easier default point A and B keep 19 of 20 nulls inside δ | DEV-005, IMP-070, IMP-071 |
 | E7 (planted residual set to zero) | Gain error falls to 4, 18, 21 and 34% at L1–L4 at the easy point, so the unmodelled residual explains part of the error there but not at the matched points | IMP-072 |
 | E8 (12 real pilot recordings) | 19-D reproduces C4b–C4d; A removes the parameter runaway and drops a median 17.7% of samples | IMP-073, DEV-005 |
-| D1/D2 oracle PySR on synthetic rows | The smoke fit finds the planted product at complexity 3. Turbo on and off give different fronts (3 of 3 seeds, speed-up 1.5 to 1.8), so turbo stays off | IMP-060 |
+| D2 smoke (IMP-060) | The smoke fit finds the planted product at complexity 3. Turbo on and off give different fronts (3 of 3 seeds, speed-up 1.5 to 1.8), so turbo stays off | IMP-060 |
+| D1 (G0 series, filter A, q_fixed; read-only, not committed) | 88 of 100<!--doc DEVIATIONS.md::88 of 100 G0 series diverged--> G0 series diverged, all by the state-SD rule on y1 (noise-driven steady-state SD 0.252<!--doc DEVIATIONS.md::steady-state SD 0.252-->). Overshoot median 10.4 SD<!--doc DEVIATIONS.md::overshoot median 10.4 SD-->. The true simulated state exceeded 10 SD at the same moment in 87 of 88<!--doc DEVIATIONS.md::in 87 of 88 (simulator units)--> (simulator units). Every series is limit-cycle (p 120 or 138.2<!--doc DEVIATIONS.md::(p 120 or 138.2)-->) | IMP-101 |
+| D1 follow-up (12 real pilot recordings; read-only) | Filtered state median 0.3 to 0.7 ruler SD<!--doc DEVIATIONS.md::median 0.3 to 0.7 ruler SD-->. Flags are 1 to 9 brief spikes, at most 141 ms<!--doc DEVIATIONS.md::at most 141 ms--> (sub-019 20, sub-074 141, sub-081 31, sub-086 31, sub-088 20, sub-107 129 ms<!--doc DEVIATIONS.md::sub-107 129 ms-->). 6 of 12 real recordings flagged<!--doc DEVIATIONS.md::6 of 12 real recordings flagged-->. The real divergences are single-crossing hair-trigger events, not limit-cycle amplitude | IMP-101 |
+| D2 oracle PySR on TRUE states (12 fits, 120 s, 3 series each at L4 and L2; read-only) | Exact target: planted product signature recovered 6/6<!--doc DEVIATIONS.md::signature 6/6--> (NRMSE L4 0.0001 to 0.0011, L2 0.0016 to 0.0067<!--doc DEVIATIONS.md::L2 0.0016 to 0.0067-->). Weak-form target: product found 3/3 at L4 (NRMSE 0.19 to 0.22<!--doc DEVIATIONS.md::NRMSE 0.19 to 0.22-->, below the linear floor 0.28 to 0.29<!--doc DEVIATIONS.md::linear floor of 0.28 to 0.29-->) and 0/3 at L2 (NRMSE 0.28, 0.71, 0.70<!--doc DEVIATIONS.md::0.28, 0.71, 0.70-->). The weak-form derivative alone has NRMSE 0.22 to 0.23 at L4 and 0.08 to 0.18 at L2<!--doc DEVIATIONS.md::0.22 to 0.23 at L4 and 0.08 to 0.18 at L2-->, so the derivative estimator is the limit at L2, not PySR. This is a best case on clean true states and says nothing about filtered states. `pytest -m pysr`: 3 passed in 371.66 s<!--doc DEVIATIONS.md::3 passed in 371.66 s--> | IMP-101 |
 | DEV-007 and its selection test | The dwell-plus-parameter divergence rule failed its pre-declared test: sensitivity 0.883<!--doc DEVIATIONS.md::sensitivity 0.883--> (needs 0.9), false-positive rate 0.425<!--doc DEVIATIONS.md::false-positive rate 0.425--> (needs 0.05). The runaway labels were a design error. The rule was **not adopted** and the legacy rule ships | IMP-091 to IMP-093 |
 | One-step metric (pilot, 3 subjects) | On this oversampled, band-limited signal the one-step error favours a linear VAR over the Jansen–Rit UKF by about three orders of magnitude<!--doc PLAN.md::about three orders of magnitude-->. This is a property of the metric and of R, so M3 < M0 was expected to fail | IMP-079 |
 | Planted-ratio note (E2) | The realised planted-to-base RMS ratio is 0.46 to 0.53 at L1–L3 but 0.76 to 0.84<!--doc PLAN.md::0.76 to 0.84--> at L4, against the 0.50 target | PLAN E2, IMP-065 |
-| Filtered-parameter bias | The filtered p is 260 to 440<!--doc DEVIATIONS.md::p_est 260 to 440 against a true 120 to 138--> where the synthetic truth is 120 to 138: the filter sits in the noise-driven regime while the data are limit-cycle | DEV-007 |
+| Filtered-parameter bias | The filtered p is 260 to 440<!--doc DEVIATIONS.md::p_est 260 to 440 against a true 120 to 138--> where the synthetic truth is 120 to 138; the cause was not investigated | DEV-007 |
 | K0 round 0 (block 92000) | Killed by an operator timeout during evaluation. No result was seen or recorded, and the block stays burnt | IMP-096, IMP-097 |
 
 ## 5. Limitations
@@ -85,6 +88,7 @@ What was found is more proximate and sits at the gate: on synthetic data with a 
 4. The pre-declared divergence-rule fix failed its own selection test and was not adopted.
 5. On the pilot's real recordings, divergence under the legacy rule is common (6 of 12; 9 of 12 at 0.1 Hz).
 6. The pilot's one-step metric favours a linear VAR by about three orders of magnitude.
+7. Oracle PySR on true, unfiltered states (D2, IMP-101) recovers the planted product from the exact target in 6 of 6 fits and from the weak-form target in 3 of 3 fits at L4 but 0 of 3 at L2, where the weak-form derivative estimator is the limit (NRMSE 0.08 to 0.18 for the derivative alone). This is a best case on clean states and says nothing about filtered states.
 
 **Unknown (never tested here)**
 1. Whether any other observation model, q, δ or divergence rule would pass the null arms.
@@ -93,7 +97,8 @@ What was found is more proximate and sits at the gate: on synthetic data with a 
 4. Whether the PySR half of the null criterion would be met (PySR was not run at formal size).
 5. Why the filtered p is biased high (only the observation is recorded).
 6. Whether real EEG of this kind contains identifiable inter-node coupling, and whether M3 beats M2 or M0. No such test was made.
-7. Anything about the 33 test subjects. They were never read.
+7. Whether PySR recovers filtered-state residuals (the oracle test of finding 7 used true states only).
+8. Anything about the 33 test subjects. They were never read.
 
 ## 8. Source files
 

@@ -119,3 +119,42 @@ def test_hash_of_gate_matches_formal_result_hash():
         pytest.skip("outputs/gate.json or results/g0_null_arms_r1.json absent (not committed)")
     doc = json.loads(gate.read_text(encoding="utf-8"))
     assert doc["formal_results_sha256"] == hashlib.sha256(res.read_bytes()).hexdigest()
+
+
+IMP101_NUMBERS = [
+    "371.66", "88 of 100", "0.252", "10.4 SD", "87 of 88", "120 or 138.2",
+    "0.3 to 0.7 ruler SD", "1 to 9", "141 ms", "sub-019 20", "sub-074 141", "sub-081 31", "sub-086 31",
+    "sub-088 20", "sub-107 129", "6 of 12", "12 fits", "120 s", "6/6", "0.0001 to 0.0011", "0.0016 to 0.0067",
+    "3/3", "0/3", "0.19 to 0.22", "0.28 to 0.29", "0.28, 0.71, 0.70", "0.22 to 0.23", "0.08 to 0.18",
+]
+
+
+def imp101_row():
+    text = (ROOT / "DEVIATIONS.md").read_text(encoding="utf-8")
+    rows = [l for l in text.splitlines() if l.startswith("| IMP-101 |")]
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_imp101_numbers_in_report_and_deviations():
+    row = imp101_row()
+    report = report_text()
+    d_rows = [l for l in report.splitlines() if l.rstrip().endswith("| IMP-101 |")]
+    assert len(d_rows) == 3
+    d_text = " ".join(d_rows)
+    # the finding in section 7 repeats the oracle result, so only the derivative range and counts are compared there
+    for num in IMP101_NUMBERS:
+        assert num in row, ("DEVIATIONS IMP-101", num)
+    for num in IMP101_NUMBERS:
+        assert num in d_text or num in report, ("report", num)
+    for num in ("88 of 100", "0.252", "10.4 SD", "87 of 88", "371.66", "141 ms", "129 ms", "6 of 12", "0.0016 to 0.0067", "0.28, 0.71, 0.70"):
+        assert num in d_text, ("section 4 rows", num)
+
+
+def test_imp101_wording_and_unknown():
+    report = report_text()
+    assert "best case on clean true states and says nothing about filtered states" in report
+    assert "Whether PySR recovers filtered-state residuals" in report
+    assert "noise-driven regime while the data are limit-cycle" not in report
+    assert "D2 smoke (IMP-060)" in report
+    assert "this docs commit" in imp101_row() or re.search(r"\b[0-9a-f]{7,40}\b", imp101_row().split("|")[-2])
