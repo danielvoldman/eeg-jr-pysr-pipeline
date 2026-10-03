@@ -96,6 +96,10 @@ def undrawn_tick_labels(fig):
     """Tick labels whose tick lies outside the view limits: matplotlib keeps them but never draws them."""
     out = set()
     for ax in fig.axes:
+        if not ax.axison:  # axis off: ticks, tick labels and axis labels are not drawn
+            for axis in (ax.xaxis, ax.yaxis):
+                out.update(axis.get_ticklabels())
+                out.add(axis.label)
         for axis, lim in ((ax.xaxis, ax.get_xlim()), (ax.yaxis, ax.get_ylim())):
             lo, hi = sorted(lim)
             for tick in axis.get_major_ticks():
@@ -207,7 +211,7 @@ def test_fig2_draws_exactly_the_file_values(inputs):
     assert d["arms"]["null_B"]["false_positives"] == 17 and d["cited"] == {"n": 8, "n_fail": 5}
     fig = F.build_figure(2, inputs, CFG)
     texts = [t.get_text() for t in visible_texts(fig)]
-    assert "14/20 false pos." in texts and "17/20 false pos." in texts
+    assert "14/20\nfalse pos." in texts and "17/20\nfalse pos." in texts
     assert any("0.8100" in t for t in texts) and any("0.9300" in t for t in texts)
     assert "5 of 8" in texts and "9 of 20" in texts and "11 of 20" in texts
     assert any(t.startswith("required: 0 of 20") for t in texts)
@@ -280,3 +284,106 @@ def test_phase4_stays_refused_at_the_hard_stop():
 def test_cli_rejects_unknown_figure():
     r = subprocess.run([sys.executable, "-m", "src.figures", "--figure", "10"], cwd=ROOT, capture_output=True, text=True)
     assert r.returncode != 0
+
+
+# ------------------------------------------------------------------ labels against frames, lines, marks and bars (IMP-099)
+def real_like_inputs():
+    """Counts shaped like the formal result (n = 60 per arm, cited artifact-only null 20 of 20); test values only."""
+    inp = make_inputs()
+    arm = lambda fp, d, o, p, ub, off: {  # noqa: E731
+        "n": 60, "false_positives": fp, "upper_bound_95": ub,
+        "rule_on": {"dropped": d, "outside_delta": o, "inside_delta": p},
+        "flag_off_diagnostic": {"counts": {"outside_delta": off, "inside_delta": 60 - off, "dropped": 0}}}
+    inp["formal"]["arms"] = {"null_A": arm(51, 39, 12, 9, 0.9195, 33), "null_B": arm(55, 39, 16, 5, 0.9666, 43)}
+    inp["formal"]["cited_artifact_only_null"] = {"n": 20, "n_fail": 20}
+    return inp
+
+
+INPUT_SETS = {"small": make_inputs, "real_like": real_like_inputs}
+
+
+def clear_of_marks(fig):
+    """Text artists placed in data axes (not tick labels, titles or axis labels) against the frame, line paths, markers, bars."""
+    from matplotlib.transforms import Bbox
+
+    tol = S["overlap_tol_px"]
+    fig.canvas.draw()
+    r = fig.canvas.get_renderer()
+    problems = []
+    for i, ax in enumerate(fig.axes):
+        if not ax.axison:
+            continue
+        frame = ax.get_window_extent(r)
+        for t in ax.texts:
+            if not t.get_text().strip():
+                continue
+            b = t.get_window_extent(r)
+            name = (i, t.get_text())
+            if b.x0 < frame.x0 + tol or b.x1 > frame.x1 - tol or b.y0 < frame.y0 + tol or b.y1 > frame.y1 - tol:
+                problems.append(("touches or leaves the axes frame", name))
+            grown = Bbox.from_extents(b.x0 - tol, b.y0 - tol, b.x1 + tol, b.y1 + tol)
+            for ln in ax.get_lines():
+                if ln.get_linestyle() not in ("None", "none", ""):
+                    path = ln.get_transform().transform_path(ln.get_path())
+                    if path.intersects_bbox(grown, filled=False):
+                        problems.append(("crosses a line", name))
+                if ln.get_marker() not in ("None", None, "", " "):
+                    xy = ln.get_transform().transform(ln.get_xydata())
+                    half = ln.get_markersize() * fig.dpi / 72.0 / 2
+                    for x, y in xy:
+                        if grown.x0 - half <= x <= grown.x1 + half and grown.y0 - half <= y <= grown.y1 + half:
+                            problems.append(("covers a marker", name))
+            for p in ax.patches:
+                if grown.overlaps(p.get_window_extent(r)):
+                    problems.append(("touches a bar", name))
+    return problems
+
+
+@pytest.mark.parametrize("which", sorted(INPUT_SETS))
+def test_fig2_texts_clear_of_frames_lines_markers_and_bars(which):
+    fig = F.build_figure(2, INPUT_SETS[which](), CFG)
+    assert clear_of_marks(fig) == []
+
+
+def test_clear_of_marks_checker_catches_each_kind():
+    fig = F.build_figure(2, make_inputs(), CFG)
+    ax_b, ax_c = fig.axes[1], fig.axes[2]
+    ax_b.text(1.0, 0.5, "x" * 40, transform=ax_b.transAxes, fontsize=S["font_tick_pt"])   # runs through the right frame
+    ax_c.text(0, 1.5, "on the line", ha="center", fontsize=S["font_tick_pt"])             # on the reference line
+    ax_b.text(0, 3, "on a bar", ha="center", fontsize=S["font_tick_pt"])                  # on a bar
+    kinds = {k for k, _ in clear_of_marks(fig)}
+    assert {"touches or leaves the axes frame", "crosses a line", "touches a bar"} <= kinds
+
+
+def test_panel_a_has_no_frame_and_keeps_its_text():
+    fig = F.build_figure(2, make_inputs(), CFG)
+    ax_a = fig.axes[0]
+    assert not ax_a.axison
+    assert not any(sp.get_visible() for sp in ax_a.spines.values() if ax_a.axison)
+    assert any("not run (formal G0)" in t.get_text() for t in ax_a.texts)
+
+
+@pytest.mark.parametrize("which", sorted(INPUT_SETS))
+def test_panel_c_plots_shares_in_percent_with_the_counts_in_labels(which):
+    inp = INPUT_SETS[which]()
+    fig = F.build_figure(2, inp, CFG)
+    ax_c = fig.axes[2]
+    arms = inp["formal"]["arms"]
+    cited = inp["formal"]["cited_artifact_only_null"]
+    expected = [(arms["null_A"]["flag_off_diagnostic"]["counts"]["outside_delta"], arms["null_A"]["n"]),
+                (arms["null_B"]["flag_off_diagnostic"]["counts"]["outside_delta"], arms["null_B"]["n"]),
+                (cited["n_fail"], cited["n"])]
+    marks = [ln for ln in ax_c.get_lines() if ln.get_marker() not in ("None", None, "", " ")]
+    assert len(marks) == 3
+    for ln, (k, n) in zip(marks, expected):
+        assert ln.get_xdata()[0] == pytest.approx(100.0 * k / n)
+        assert 0 <= ln.get_xdata()[0] <= 100
+    texts = [t.get_text() for t in ax_c.texts]
+    for k, n in expected:
+        assert f"{k} of {n}" in texts
+    assert "%" in ax_c.get_xlabel()
+    assert "not verdicts" in ax_c.get_xlabel()
+    line = next(ln for ln in ax_c.get_lines() if ln.get_linestyle() == "--")
+    assert list(line.get_xdata()) == [0, 0]
+    labels = [t.get_text() for t in ax_c.get_yticklabels()]
+    assert any("pilot, cited" in s for s in labels) and sum("diagnostic" in s for s in labels) == 2

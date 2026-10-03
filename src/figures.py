@@ -194,15 +194,14 @@ def build_fig2(inputs, cfg, pilot=False):
     names = {"null_A": "Null A", "null_B": "Null B"}
     with figstyle(cfg):
         fig = new_figure(2, cfg)
-        gs = fig.add_gridspec(1, 3)
+        gs = fig.add_gridspec(1, 3, width_ratios=f["panel_width_ratios"])
         ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
         banner = "G0 HARD STOP" if d["hard_stop"] else "G0"
         fig.suptitle(f"Fig 2  {FIGURES[2][1]}: {banner}, both null arms failed", fontsize=f["font_label_pt"], fontweight="bold")
 
         # A: recovery by coupling level (positive control not run)
         ax_a.set_title("A", loc="left", fontsize=f["font_panel_pt"], fontweight="bold")
-        ax_a.set_xticks([])
-        ax_a.set_yticks([])
+        ax_a.set_axis_off()
         ax_a.text(0.5, 0.5, "Recovery by coupling level\n\nPositive control:\nnot run (formal G0)", ha="center", va="center",
                   fontsize=f["font_label_pt"], transform=ax_a.transAxes)
 
@@ -218,9 +217,11 @@ def build_fig2(inputs, cfg, pilot=False):
                 ax_b.bar(i, arms[key][field], f["bar_width"], bottom=bottom, color=color, hatch=hatch,
                          edgecolor=c["text"], linewidth=f["line_axes_pt"], label=label if i == 0 else None)
                 bottom += arms[key][field]
-            ax_b.text(i, bottom, f"{arms[key]['false_positives']}/{arms[key]['n']} false pos.",
-                      ha="center", va="bottom", fontsize=f["font_tick_pt"])
-        ax_b.set_xticks(range(2), [f"{names[k]}\n95% upper bound\n{arms[k]['bound']:.4f}" for k in ("null_A", "null_B")])
+            ax_b.annotate(f"{arms[key]['false_positives']}/{arms[key]['n']}\nfalse pos.", (i, bottom), xytext=(0, f["label_pad_pt"]),
+                          textcoords="offset points", ha="center", va="bottom", fontsize=f["font_tick_pt"])
+        ax_b.set_xticks(range(2), [f"{names[k]}\nbound {arms[k]['bound']:.4f}" for k in ("null_A", "null_B")])
+        ax_b.set_xlabel("bound: one-sided 95% upper\nbound on the false-positive rate")
+        ax_b.set_xlim(-f["bar_xlim_pad"], 1 + f["bar_xlim_pad"])
         ax_b.set_ylim(0, n * (1 + f["headroom_fraction"]))
         ax_b.set_ylabel(f"series (n = {n} per arm)")
         handles, labels = ax_b.get_legend_handles_labels()
@@ -230,18 +231,21 @@ def build_fig2(inputs, cfg, pilot=False):
         ax_c.set_title("C", loc="left", fontsize=f["font_panel_pt"], fontweight="bold")
         rows = [("Null A, rule off\n(diagnostic)", arms["null_A"]["flag_off_outside"], arms["null_A"]["n"]),
                 ("Null B, rule off\n(diagnostic)", arms["null_B"]["flag_off_outside"], arms["null_B"]["n"]),
-                ("Artifact-only null,\npilot (cited)", d["cited"]["n_fail"], d["cited"]["n"])]
+                ("Artifact-only null,\npilot, cited", d["cited"]["n_fail"], d["cited"]["n"])]
         for y, (label, k, nn) in enumerate(rows):
-            ax_c.plot([k], [y], marker="o", markerfacecolor="none", markeredgecolor=c["text"], linestyle="none",
+            share = f["percent_scale"] * k / nn
+            ax_c.plot([share], [y], marker="o", markerfacecolor="none", markeredgecolor=c["text"], linestyle="none",
                       markersize=f["marker_pt"])
-            ax_c.text(k, y + 0.28, f"{k} of {nn}", ha="center", va="bottom", fontsize=f["font_tick_pt"])
+            ax_c.annotate(f"{k} of {nn}", (share, y), xytext=(0, f["label_pad_pt"] + f["marker_pt"]), textcoords="offset points",
+                          ha="center", va="bottom", fontsize=f["font_tick_pt"])
         ax_c.axvline(0, color=c["bar_outside_delta"], linestyle="--", linewidth=f["line_data_pt"])
-        ax_c.text(0, len(rows) - 0.35, f"required: 0 of {arms['null_A']['n']}", ha="left", va="bottom", fontsize=f["font_tick_pt"],
-                  color=c["bar_outside_delta"])
+        ax_c.annotate(f"required: 0 of {arms['null_A']['n']}", (0, f["panel_c_required_y"]), xytext=(f["label_pad_pt"], 0),
+                      textcoords="offset points", ha="left", va="center", fontsize=f["font_tick_pt"], color=c["bar_outside_delta"])
         ax_c.set_yticks(range(len(rows)), [r[0] for r in rows])
-        ax_c.set_ylim(-0.6, len(rows) + 0.2)
-        ax_c.set_xlim(-2, n + 2)
-        ax_c.set_xlabel("series outside δ or dropped")
+        ax_c.set_ylim(*f["panel_c_ylim"])
+        ax_c.set_xlim(*f["percent_xlim"])
+        ax_c.set_xticks(f["percent_ticks"])
+        ax_c.set_xlabel("series outside δ or dropped (%)\nrule-off, pilot rows: not verdicts")
         add_footer(fig, inputs["gate"], cfg, pilot)
     return fig
 

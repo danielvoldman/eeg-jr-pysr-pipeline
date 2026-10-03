@@ -685,6 +685,14 @@ figures:
   palette_min_dl_gray: {value: 15, prov: locked, ref: "IMP-099", note: "grayscale dL* between colours, or a distinct marker plus linestyle (tests)"}
   bar_width: {value: 0.6, prov: placeholder, ref: "IMP-099", note: "layout only"}
   headroom_fraction: {value: 0.25, prov: placeholder, ref: "IMP-099", note: "layout only: space above the bars for annotations"}
+  label_pad_pt: {value: 3, prov: placeholder, ref: "IMP-099", note: "layout only: offset of a label from the mark it labels, in points"}
+  bar_xlim_pad: {value: 0.9, prov: placeholder, ref: "IMP-099", note: "layout only: x margin beyond the outer bar centres"}
+  panel_width_ratios: {value: [0.6, 1.2, 1.2], prov: placeholder, ref: "IMP-099", note: "layout only: Fig 2 panels A, B, C"}
+  panel_c_ylim: {value: [-0.6, 3.6], prov: placeholder, ref: "IMP-099", note: "layout only: rows sit at y = 0, 1, 2; headroom above for the criterion label"}
+  panel_c_required_y: {value: 3.1, prov: placeholder, ref: "IMP-099", note: "layout only: height of the required-0 label"}
+  percent_scale: {value: 100, prov: locked, ref: "IMP-099", note: "Fig 2 panel C shows a share of series, in percent"}
+  percent_xlim: {value: [-4, 125], prov: placeholder, ref: "IMP-099", note: "layout only"}
+  percent_ticks: {value: [0, 25, 50, 75, 100], prov: placeholder, ref: "IMP-099", note: "layout only"}
   colors:
     bar_dropped: {value: "#D9D9D9", prov: locked, ref: "IMP-099", note: "Okabe-Ito based; checked by tests/test_figures.py"}
     bar_outside_delta: {value: "#D55E00", prov: locked, ref: "IMP-099"}
